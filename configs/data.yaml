@@ -1,0 +1,6 @@
+path: D:/dehaze_fusion/yolo_dataset
+train: images/train
+val: images/val
+
+nc: 4
+names: ['insulator', 'power_line', 'ice', 'tower']
