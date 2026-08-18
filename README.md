@@ -306,7 +306,7 @@ processing_report.xlsx             # Excel 报告 (4个工作表)
 | 模型 | 文件 | 大小 | 说明 |
 |------|------|------|------|
 | HazeCLIP | model.pth | ~108MB | HazeCLIP 教师模型 |
-| Mask R-CNN | model_0004999.pth | ~335MB | 同事提供的 detectron2 权重 |
+| Mask R-CNN | model_0004999.pth | ~335MB | detectron2 权重 |
 | M1~M4 | m{1,2,2p,3,4}_best.pth | 5.6~15.6MB | IceWave 各版本检查点 |
 | DehazeFormer | dehazeformer.pth | ~5.7MB | DehazeFormer 预训练权重 |
 | YOLOv8 | best.pt / last.pt | ~5.9MB | YOLO 电力线检测权重 |
