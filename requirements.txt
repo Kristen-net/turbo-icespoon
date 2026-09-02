@@ -1,0 +1,13 @@
+# IceWave 核心依赖 (与 pyproject.toml dependencies 一致)
+# 安装: pip install -r requirements.txt
+# GPU 版 PyTorch 请先按官网安装对应 CUDA 版本, 再装其余依赖。
+torch>=2.0
+torchvision>=0.15
+numpy>=1.24
+opencv-python-headless>=4.8
+timm>=0.9
+pyyaml>=6.0
+tqdm>=4.66
+
+# 训练与评测
+torchmetrics>=1.0

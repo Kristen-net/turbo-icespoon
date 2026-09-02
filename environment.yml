@@ -1,0 +1,22 @@
+# IceWave 复现环境 (conda)
+# 用法: conda env create -f environment.yml && conda activate icewave
+name: icewave
+channels:
+  - pytorch
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11
+  - pip
+  # PyTorch (CUDA 版本按服务器 GPU 调整; 此示例为 CUDA 12.1)
+  - pytorch>=2.1
+  - torchvision>=0.16
+  - pytorch-cuda=12.1
+  - numpy>=1.24
+  - opencv>=4.8
+  - pyyaml>=6.0
+  - pip:
+      - timm>=0.9
+      - tqdm>=4.66
+      - torchmetrics>=1.0
+      - -e .          # 安装 icewave 包本身 (editable)

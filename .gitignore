@@ -1,0 +1,52 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+
+# Model weights (too large for git)
+*.pth
+*.pt
+*.onnx
+
+# 运行产物 (路径参数化后的输出/权重目录)
+outputs/
+weights/
+data/
+
+# 测试缓存
+.pytest_cache/
+.coverage
+htmlcov/
+*.egg-info/
+.eggs/
+
+# Large data files
+*.zip
+*.tar
+*.gz
+*.rar
+
+# Datasets (images are too numerous)
+yolo_dataset/
+my_test/input/
+my_test/output/
+my_test/compare/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*~
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Temporary files
+*.tmp
+*.log
+*.bak

@@ -1,0 +1,26 @@
+# 公开基准评测配置 (P0-3)
+# 每个基准: hazy_dir (雾图) + gt_dir (清晰真值, 可选, 用于 paired 指标)
+# 路径支持 ${ENV:default} 占位符。
+#
+# 数据集获取 (需自行下载, 权重/数据不随仓库分发):
+#   - RESIDE SOTS-Indoor:  https://sites.google.com/view/reside-dehaze-datasets
+#   - RESIDE SOTS-Outdoor: 同上
+#   - O-HAZE / I-HAZE:     https://data.vision.ee.ethz.ch/cvl/ntire18/
+# 下载后设置 ICEWAVE_DATA_ROOT 或直接改下方路径。
+
+benchmarks:
+  reside_sots_indoor:
+    hazy_dir: ${ICEWAVE_DATA_ROOT}/benchmarks/RESIDE/SOTS/indoor/hazy
+    gt_dir: ${ICEWAVE_DATA_ROOT}/benchmarks/RESIDE/SOTS/indoor/gt
+
+  reside_sots_outdoor:
+    hazy_dir: ${ICEWAVE_DATA_ROOT}/benchmarks/RESIDE/SOTS/outdoor/hazy
+    gt_dir: ${ICEWAVE_DATA_ROOT}/benchmarks/RESIDE/SOTS/outdoor/gt
+
+  ohaze:
+    hazy_dir: ${ICEWAVE_DATA_ROOT}/benchmarks/O-HAZE/hazy
+    gt_dir: ${ICEWAVE_DATA_ROOT}/benchmarks/O-HAZE/gt
+
+  ihaze:
+    hazy_dir: ${ICEWAVE_DATA_ROOT}/benchmarks/I-HAZE/hazy
+    gt_dir: ${ICEWAVE_DATA_ROOT}/benchmarks/I-HAZE/gt

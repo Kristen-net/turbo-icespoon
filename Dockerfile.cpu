@@ -1,0 +1,31 @@
+# IceWave CPU 推理镜像 (部署门槛降低, P0-2c)
+# 构建: docker build -f Dockerfile.cpu -t icewave:cpu .
+# 运行: docker run --rm -it -v $PWD/data:/data -v $PWD/weights:/weights \
+#           -e ICEWAVE_DATA_ROOT=/data -e ICEWAVE_WEIGHTS_DIR=/weights \
+#           icewave:cpu icewave-infer --input /data/test/hazy --model m4
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# 系统依赖 (opencv 运行时)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libgl1 libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+# 先装 PyTorch CPU (体积小, 适合推理)
+RUN pip install --no-cache-dir torch torchvision --index-url https://download.pytorch.org/whl/cpu
+
+# 复制依赖清单并安装
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# 复制源码并安装包
+COPY . .
+RUN pip install --no-cache-dir -e .
+
+# 环境变量占位 (运行时覆盖)
+ENV ICEWAVE_DATA_ROOT=/data
+ENV ICEWAVE_WEIGHTS_DIR=/weights
+ENV ICEWAVE_OUTPUT_DIR=/outputs
+
+ENTRYPOINT ["icewave-infer"]

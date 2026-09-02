@@ -1,0 +1,85 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "icewave"
+version = "0.2.0"
+description = "IceWave-DehazeFormer: 雾天输电线路去雾与覆冰检测研究框架"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [
+    { name = "IceWave contributors" },
+]
+keywords = ["dehaze", "dehazing", "image-restoration", "ice-detection",
+            "transmission-line", "deep-learning", "pytorch"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Image Recognition",
+]
+
+# 核心依赖 (精简; 平台/可选依赖见下)
+dependencies = [
+    "torch>=2.0",
+    "torchvision>=0.15",
+    "numpy>=1.24",
+    "opencv-python-headless>=4.8",
+    "timm>=0.9",
+    "pyyaml>=6.0",
+    "tqdm>=4.66",
+]
+
+[project.optional-dependencies]
+# 训练与评测
+train = [
+    "torchmetrics>=1.0",
+]
+# 覆冰检测 (AGPL-3.0, 商业使用需评估; 见 NOTICE.md)
+detect = [
+    "ultralytics>=8.2",
+]
+# 感知质量指标
+quality = [
+    "lpips>=0.1",
+]
+# 开发与测试
+dev = [
+    "pytest>=7.4",
+    "pytest-cov>=4.0",
+]
+# 一键安装全部
+all = [
+    "torchmetrics>=1.0",
+    "ultralytics>=8.2",
+    "lpips>=0.1",
+    "pytest>=7.4",
+]
+
+[project.scripts]
+icewave-train = "icewave.train.cli:main"
+icewave-infer = "icewave.infer.cli:main"
+icewave-eval-benchmark = "icewave.eval.benchmark:main"
+icewave-eval-downstream = "icewave.eval.downstream:main"
+icewave-build-dataset = "icewave.data.build_dataset:main"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "-q"
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "ignore::FutureWarning",
+]

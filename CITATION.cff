@@ -1,0 +1,16 @@
+# 引用本项目时请使用以下格式
+cff-version: 1.2.0
+message: "如果本工作对你的研究有帮助, 请引用。"
+title: "IceWave-DehazeFormer: Ice-Aware Dehazing for Transmission-Line Inspection"
+authors:
+  - family-names: "IceWave"
+    given-names: "Contributors"
+version: 0.2.0
+date-released: 2026-09-02
+keywords:
+  - image dehazing
+  - ice detection
+  - transmission line inspection
+  - wavelet frequency enhancement
+  - deep learning
+license: Apache-2.0

@@ -1,0 +1,24 @@
+# joint (P1-1 联合优化: M4 + 走廊纹理保持损失 + 不确定性加权)
+# 这是面向 SCI 一区"检测感知去雾"创新点的关键训练模式
+model:
+  version: joint
+  backbone: s
+
+data:
+  root: ${ICEWAVE_DATA_ROOT}/dataset
+  patch_size: 192
+
+train:
+  epochs: 30
+  batch_size: 4
+  lr: 1.0e-4
+  prompt_drop_prob: 0.5
+  train_prompt_proj: true
+
+losses:
+  lambda_l1: 1.0
+  lambda_ssim: 0.1
+  lambda_kd: 0.05
+  lambda_itl: 0.5
+  corridor_lambda_grad: 1.0
+  n_losses: 4          # recon + kd + itl + corridor

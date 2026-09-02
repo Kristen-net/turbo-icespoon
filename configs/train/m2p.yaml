@@ -1,0 +1,17 @@
+# m2p (HA-WFE v2, 无 CLIP 提示/ITL)
+model:
+  version: m2p
+  backbone: s
+
+data:
+  root: ${ICEWAVE_DATA_ROOT}/dataset
+  patch_size: 192
+
+train:
+  epochs: 30
+  batch_size: 4
+  lr: 1.0e-4
+
+losses:
+  lambda_l1: 1.0
+  lambda_ssim: 0.1

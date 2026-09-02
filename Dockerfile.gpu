@@ -1,0 +1,24 @@
+# IceWave GPU 训练/推理镜像 (需 nvidia-docker)
+# 构建: docker build -f Dockerfile.gpu -t icewave:gpu .
+# 运行: docker run --rm --gpus all -it -v $PWD/data:/data -v $PWD/weights:/weights \
+#           -e ICEWAVE_DATA_ROOT=/data -e ICEWAVE_WEIGHTS_DIR=/weights \
+#           icewave:gpu icewave-train --config configs/train/m4.yaml
+FROM pytorch/pytorch:2.1.0-cuda12.1-cudnn8-runtime
+
+WORKDIR /app
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libgl1 libglib2.0-0 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY . .
+RUN pip install --no-cache-dir -e .
+
+ENV ICEWAVE_DATA_ROOT=/data
+ENV ICEWAVE_WEIGHTS_DIR=/weights
+ENV ICEWAVE_OUTPUT_DIR=/outputs
+
+ENTRYPOINT ["icewave-train"]

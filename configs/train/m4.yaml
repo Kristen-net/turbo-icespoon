@@ -1,0 +1,37 @@
+# IceWave 训练配置模板
+# 路径支持 ${ENV:default} 环境变量占位符, 见 icewave.train.config.load_config
+#
+# 使用: icewave-train --config configs/train/m4.yaml
+#       icewave-train --config configs/train/m4.yaml --override train.epochs=60
+
+seed: 42
+deterministic: false
+# device: cuda  # 留空自动检测
+
+model:
+  version: m4        # m1/m2/m2p/m3/m4/joint
+  backbone: s        # s/t/b
+  # init_checkpoint: ${ICEWAVE_WEIGHTS_DIR}/checkpoints/m2p_best.pth
+
+data:
+  root: ${ICEWAVE_DATA_ROOT}/dataset   # 需包含 train/ val/ 子目录
+  patch_size: 192
+
+train:
+  epochs: 30
+  batch_size: 4
+  lr: 1.0e-4
+  weight_decay: 1.0e-4
+  num_workers: 0
+  grad_clip: 0.0
+  prompt_drop_prob: 0.5
+  train_prompt_proj: true   # 修复旧版 prompt 投影层不更新问题
+
+losses:
+  lambda_l1: 1.0
+  lambda_ssim: 0.1
+  lambda_kd: 0.05
+  lambda_itl: 0.5
+  itl_lambda_region: 0.5
+  itl_lambda_boundary: 0.3
+  itl_region_term: ssim   # ssim(论文表述) | l1(旧代码行为)

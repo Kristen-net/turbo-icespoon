@@ -1,0 +1,17 @@
+# m1 基线 (DehazeFormer-S, 无 HA-WFE/ITL/CLIP 提示)
+model:
+  version: m1
+  backbone: s
+
+data:
+  root: ${ICEWAVE_DATA_ROOT}/dataset
+  patch_size: 192
+
+train:
+  epochs: 30
+  batch_size: 4
+  lr: 1.0e-4
+
+losses:
+  lambda_l1: 1.0
+  lambda_ssim: 0.1
