@@ -1,0 +1,76 @@
+# IceWave 预训练权重清单 (P0-2c 重构: 抽离出 download_weights.py)
+#
+# 文件格式: YAML, 维护者可手工编辑或通过 scripts/populate_manifest.py 自动填写。
+# 本文件由 download_weights.py 读取, 占位符 (空 url / 空 sha256) 会被脚本跳过并提示。
+#
+# ---------------------------------------------------------------------------
+# 上传工作流 (维护者):
+#   1. 在 HuggingFace Hub 创建仓库 (推荐): Kristen-net/icewave-weights
+#      或在 GitHub Releases 上传附件: 仓库 → Releases → Draft new → 上传 .pth
+#   2. 训练得到 .pth 后, 放到本地目录 e.g. outputs/train/m4/best.pth
+#   3. python scripts/populate_manifest.py --root outputs/train \
+#        --base-url https://huggingface.co/Kristen-net/icewave-weights/resolve/main
+#      自动算 SHA256 + 写本 YAML
+#   4. 上传文件到 HF / Releases 后 git commit 本 YAML
+#   5. 用户运行 python scripts/download_weights.py --all 即可
+#
+# ---------------------------------------------------------------------------
+# 字段说明:
+#   url:  HTTP(S) 直链; 留空 = 当前不提供下载 (本地放置也可, 无须 url)
+#   sha256: 64 字符小写十六进制; 留空 = 下载后不校验 (不安全, 仅调试)
+#   rel: 相对 ICEWAVE_WEIGHTS_DIR (默认项目 weights/) 的目标路径
+#   size_bytes: 可选, 仅展示; populate_manifest.py 会填充
+#   note: 可选备注 (例如"对应 configs/train/m4.yaml")
+# ---------------------------------------------------------------------------
+
+manifest_version: 1
+
+# === 去雾骨干 (DehazeFormer-S + HA-WFE, P1-1 联合模型) ===
+m1:
+  url: ""
+  sha256: ""
+  rel: checkpoints/m1_best.pth
+  note: configs/train/m1.yaml — 引入 HA-WFE v1 的消融基准
+
+m2:
+  url: ""
+  sha256: ""
+  rel: checkpoints/m2_best.pth
+  note: configs/train/m2.yaml — Tanh+共享 α 门控
+
+m2p:
+  url: ""
+  sha256: ""
+  rel: checkpoints/m2p_best.pth
+  note: configs/train/m2p.yaml — Sigmoid+独立 α 门控
+
+m3:
+  url: ""
+  sha256: ""
+  rel: checkpoints/m3_best.pth
+  note: configs/train/m3.yaml — 加 HazeCLIP 提示蒸馏
+
+m4:
+  url: ""
+  sha256: ""
+  rel: checkpoints/m4_best.pth
+  note: configs/train/m4.yaml — 在 m3 基础上加 ITL 冰感知损失
+
+joint:
+  url: ""
+  sha256: ""
+  rel: checkpoints/joint_best.pth
+  note: configs/train/joint.yaml — 去雾 + 覆冰检测 + 下游 mAP 联合
+
+# === 教师 / 检测权重 (可选, 与上述互补) ===
+hazeclip:
+  url: ""
+  sha256: ""
+  rel: hazeclip/model.pth
+  note: HazeCLIP 教师; 上游: source_hazeclip/README.md (MIT-style)
+
+yolo:
+  url: ""
+  sha256: ""
+  rel: yolo/power_line_best.pt
+  note: YOLOv8 覆冰检测; ultralytics ≥ 8.2, AGPL-3.0 (见 NOTICE.md)
