@@ -1,3 +1,14 @@
+# ⚠️ 历史遗留配置 (审计编号 M3)
+#
+# 此文件来自旧版 HazeCLIP 推理流程 (源仓 source_hazeclip/), 与新版
+# IceWave-DehazeFormer 的推理入口 icewave-infer 不兼容.
+#
+# 新版推理请使用:
+#   icewave-infer --input <dir> --model m3 --weights weights/checkpoints/m3_best.pth
+#
+# 本文件保留仅为追溯, 不会随 pip install -e . 一起被加载.
+# 详见 docs/AUDIT_REPORT.md (2026-09).
+# ---------------------------------------------------------------------------
 weight: "./weights/model.pth"
 input_folder: "./images/"
 output_folder: "./outputs/"

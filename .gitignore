@@ -13,9 +13,10 @@ build/
 *.onnx
 
 # 运行产物 (路径参数化后的输出/权重目录)
+# 注意: 仅忽略顶层 data/ (运行时数据集挂载点), 不要碰 src/icewave/data/ 包.
 outputs/
 weights/
-data/
+/data/
 
 # 测试缓存
 .pytest_cache/

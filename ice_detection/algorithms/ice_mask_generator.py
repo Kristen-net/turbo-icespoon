@@ -1,4 +1,15 @@
 """
+⚠️ 此文件已迁移到 `src/icewave/detect/ice_mask.py` (审计编号 H7)。
+
+历史开发过程文件, 仅供追溯。新代码 / 推理 / 训练请使用新包:
+
+    from icewave.detect.ice_mask import generate_ice_mask, pseudo_ice_mask_simple
+
+新版接口在原基础上做了模块化拆分 (generate_ice_mask / pseudo_ice_mask_simple),
+并支持走廊约束 + YOLO 检测结果双重来源。
+
+详见 docs/AUDIT_REPORT.md §H7。
+
 覆冰掩码自动标注器
 
 生成覆冰区域伪标签, 用于ITL损失训练

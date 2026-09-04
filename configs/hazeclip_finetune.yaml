@@ -1,3 +1,16 @@
+# ⚠️ 历史遗留配置 (审计编号 M3)
+#
+# 此文件来自旧版 HazeCLIP 微调流程 (源仓 source_hazeclip/), 与新版
+# IceWave-DehazeFormer 的训练入口 icewave-train 不兼容.
+#
+# 新版训练请使用:
+#   icewave-train --config configs/train/m3.yaml       # CLIP 蒸馏
+#   icewave-train --config configs/train/m4.yaml       # M3 + ITL
+#   icewave-train --config configs/train/joint.yaml    # M4 + 检测感知联合
+#
+# 本文件保留仅为追溯, 不会随 pip install -e . 一起被加载.
+# 详见 docs/AUDIT_REPORT.md (2026-09).
+# ---------------------------------------------------------------------------
 data:
   crop_size: 256
   folder: './data/COMPOUND/'

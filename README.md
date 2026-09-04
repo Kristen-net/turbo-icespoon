@@ -1,321 +1,347 @@
 # IceWave-DehazeFormer
 
-## 雾天输电线路图像去雾系统
+> 雾天输电线路去雾与覆冰检测研究框架 · 面向 SCI 一区投稿目标的工程化重构与创新改造
+> Apache-2.0 | PyTorch ≥ 2.0 | Python ≥ 3.10
 
-本项目实现了一个基于深度学习的雾天图像去雾系统，以 DehazeFormer 为骨干网络，融合 HA-WFE 小波特征增强、CLIP 雾提示蒸馏和 ITL 覆冰感知损失三大核心创新。覆冰检测作为独立附属模块存放在 `ice_detection/` 目录中，可与去雾管线灵活集成。
+针对雾天输电线路巡检场景, 本项目以 **DehazeFormer** 为骨干, 集成 **HA-WFE 小波
+特征增强**、**CLIP 雾提示蒸馏**、**ITL 覆冰感知损失** 三大创新模块, 并提出面向
+SCI 一区的"**检测感知联合优化框架**" (joint 训练模式) 与"**下游任务增益**"评测协议,
+将"去雾"从独立重建任务升级为下游检测任务的协同恢复。
+
+> 一句话: 一次去雾, 同时给出更清晰的图和更可靠的覆冰检测结果。
 
 ---
 
-## 项目架构
+## 1. 与旧版的关键差异
+
+| 维度 | 旧版 (`phase6/dehaze_inference.py` 等) | 新版 (`src/icewave/`) |
+|------|-----------------------------------------|-----------------------|
+| 代码形态 | 130+ 处硬编码 `D:\` `.trae-cn` 路径 | 路径全部参数化 (YAML + `ICEWAVE_*` 环境变量) |
+| 模型集成 | 运行时 monkey-patch `forward_features` | `IceWaveDehazeFormer` 标准 `nn.Module` 子类 (可导出 ONNX) |
+| 训练入口 | 6 个 `train_m*.py` 各写一份 Config | `icewave-train --config configs/train/*.yaml` |
+| 推理入口 | `python dehaze_inference.py ...` 内嵌 YOLO 自动重训 | `icewave-infer --input ... --model m4` |
+| 测试 | 0 项 | 93 项 (CPU 验证, 含检查点键名/数值兼容性) |
+| 环境矩阵 | README 硬绑 PyTorch 2.11+/CUDA 12.8+/RTX 5060 | `pyproject.toml` 声明 `torch≥2.0`, 给 CPU/多 CUDA 版本容器镜像 |
+| 许可 | README"仅供学术研究", LICENSE=Apache-2.0, 二者冲突 | README 末尾明确 Apache-2.0 条款 + 第三方依赖条款 (NOTICE.md) |
+
+---
+
+## 2. 仓库结构
 
 ```
-图像去雾主体 + 覆冰检测附属模块 (ice_detection/)
-```
-
-去雾主体融合三条技术路线：
-1. **CLIP 语言引导轻量 CNN** — 利用 CLIP 的语言-视觉对齐能力指导去雾
-2. **扩散生成式去雾** — 基于 DDPM/DDPM 的生成式图像恢复
-3. **Mamba/Transformer 新型骨干** — DehazeFormer (Transformer) 和 WDMamba (SSM)
-
----
-
-## 核心创新
-
-### HA-WFE (Haar Wavelet Feature Enhancement)
-瓶颈层 Haar 小波特征增强模块，对四个子带进行差异化处理：
-- **LL (低频)**: 保留全局结构信息
-- **LH/HL (中频)**: 增强边缘和纹理细节
-- **HH (高频)**: 抑制噪声和雾残留
-- 零初始化残差设计，减少训练不稳定
-
-### ITL (Ice-aware Triplet Loss)
-覆冰感知损失函数，包含区域约束和边界约束：
-- 区域约束: 覆冰区域与背景的分离损失
-- 边界约束: 覆冰边界的平滑过渡损失
-
-### CLIP 雾提示蒸馏
-- 训练时使用 HazeCLIP 教师模型蒸馏
-- 推理时无需 CLIP，轻量化部署
-- Prompt dropout (50%) 避免 train-test gap
-
----
-
-## 模型版本演进
-
-| 版本 | 名称 | 描述 | 参数量 | 关键改进 |
-|------|------|------|--------|---------|
-| M1 | DehazeFormer-S 基线 | 原始 DehazeFormer-S | 基准 | 基线模型 |
-| M2 | + HA-WFE v1 | 零初始化, Tanh, 共享alpha | +~10% | Haar小波特征增强(第一版) |
-| M2p | + HA-WFE v2 | 正值初始化, Sigmoid, 独立alpha | +~12% | 改进初始化和激活函数 |
-| M3 | + CLIP蒸馏 | HazeCLIP教师蒸馏 | +~13% | 语言引导去雾, 推理无需CLIP |
-| M4 | + ITL覆冰感知 | 区域+边界约束 (推荐) | +~15% | 覆冰区域感知损失 |
-
-**参数增量控制在基线模型的 10-15% 范围内。**
-
----
-
-## 开发阶段时间线
-
-### Phase 1: 初始框架搭建 (2026-08-04)
-- `generate_haze.py` — 合成雾生成工具
-- `benchmark.py` — 基准测试框架
-- `end2end_pipeline.py` — 端到端流水线初版
-- `quality_eval.py` — 图像质量评估工具 (PSNR, SSIM, 暗通道等)
-
-### Phase 2: CLIP 与 Mamba 集成 (2026-08-10 ~ 2026-08-11)
-**CLIP 路线:**
-- `clone_clip.py` / `download_clip.py` — CLIP 模型下载
-- `patch_clip.py` — CLIP 补丁适配
-- `fusion_inference.py` — 多模型融合推理
-
-**Mamba 路线:**
-- `wdmamba_inference.py` / `wdmamba_inference_v2.py` — WDMamba 推理
-- `selective_scan_interface.py` (v1~v4) — 选择性扫描接口实现
-- `mamba_ssm_init.py` — Mamba SSM 初始化
-- **关键发现**: mamba_ssm CUDA 内核无法在 Windows 编译，纯 PyTorch 实现导致显著性能下降
-
-**扩散模型路线:**
-- `diffdehaze_inference.py` — DiffDehaze 推理
-- `dehazesb_inference.py` — DehazeSB 推理
-
-**端到端检测:**
-- `end2end_ice_detection.py` / `dcp_ice.py` / `hazeclip_ice.py` — 已移至 `ice_detection/algorithms/`
-
-### Phase 3: 多轨融合 (2026-08-11 ~ 2026-08-12)
-- `fusion_3tracks.py` — 三轨融合 (DehazeFormer + HazeCLIP + WDMamba)
-- `fusion_3tracks_auto.py` — 自动三轨融合
-- `end2end_3tracks.py` / `end2end_3tracks_auto.py` — 端到端三轨
-- `run_pipeline.py` — 流水线运行器
-- `compare_old_new.py` — 新旧方法对比
-- **关键发现**: 多模型融合可能稀释最佳单模型效果; HazeCLIP 单独使用常优于融合
-
-### Phase 4: 数据集构建与基线训练 (2026-08-15)
-**数据集构建:**
-- `build_dataset.py` (v1~v3) — 数据集构建工具
-- `check_data.py` / `extract_data.py` / `check_zips.py` — 数据检查与提取
-
-**环境验证:**
-- `check_torch.py` — PyTorch 环境检查
-- `verify_dehazeformer.py` — DehazeFormer 验证
-- `verify_env.py` — 环境完整验证
-
-**权重管理:**
-- `download_weights.py` (v1~v2) — 预训练权重下载
-- `verify_weights.py` — 权重验证
-- `verify_mct.py` — MCT 验证
-
-**性能测试:**
-- `test_speed.py` / `test_speed_mct.py` / `test_speed_standard.py` — 速度测试
-- `test_batch_sizes.py` — 批量大小测试
-
-**基线训练:**
-- `train_m1.py` — M1 基线模型训练
-- `ha_wfe.py` — HA-WFE 模块实现 (第一版)
-- `train_m2.py` — M2 HA-WFE 模型训练
-
-### Phase 5: HA-WFE v2 与多版本训练 (2026-08-16)
-**HA-WFE v2:**
-- `ha_wfe_v2.py` — HA-WFE 模块改进版 (正值初始化, Sigmoid, 独立alpha)
-- `train_m2p.py` — M2p HA-WFE v2 训练
-
-**监控与分析:**
-- `read_tb.py` — TensorBoard 日志读取
-- `check_progress.py` — 训练进度检查
-- `analyze_saturation_impact.py` — 饱和度影响分析
-- `check_cuda.py` — CUDA 兼容性检查
-- `test_compat.py` — 兼容性测试
-
-**CLIP 蒸馏 (M3):**
-- `train_m3.py` — M3 CLIP 蒸馏训练
-- `monitor_m3.py` — M3 训练监控
-- `pipeline_m3_compare.py` — M3 模型流水线对比
-- `clip_fog_prompt.py` — CLIP 雾提示集成模块
-- **关键改进**: Prompt dropout (50%) + 低学习率 (5e-5) 稳定训练
-
-**ITL 覆冰感知 (M4):**
-- `itl_loss.py` — ITL 覆冰感知损失函数实现
-- `train_m4.py` — M4 ITL 覆冰感知训练
-- `monitor_m4.py` — M4 训练监控
-- `pipeline_m4_compare.py` — M4 模型流水线对比
-
-**覆冰检测与 YOLO (已移至 `ice_detection/` 目录):**
-- `ice_mask_generator.py` → `ice_detection/algorithms/`
-- `auto_label.py` → `ice_detection/algorithms/yolo_auto_label.py`
-- `train_yolo.py` → `ice_detection/training/`
-
-### Phase 6: Mask R-CNN 集成与 Excel 报告 (2026-08-17)
-**核心推理脚本 (保留在去雾主体):**
-- `dehaze_inference.py` — **主推理脚本** (38KB), 集成去雾+检测+覆冰掩码+对比图
-
-**Mask R-CNN 与 Excel 报告 (已移至 `ice_detection/` 目录):**
-- `maskrcnn_inference.py` → `ice_detection/algorithms/`
-- `generate_excel_report.py` → `ice_detection/reports/`
-- `test_configs.py` / `analyze_*.py` / `debug_*.py` / `compare_arch.py` / `pipeline_monitor.py` → `ice_detection/debug/`
-
----
-
-## 文件目录结构
-
-```
-icewave-dehazeformer/
-├── README.md                           # 本文件
-├── .gitignore
+turbo-icespoon/
+├── src/icewave/                      # ★ 唯一主代码包 (pip install -e .)
+│   ├── models/      (hawfe.py, dehazeformer.py, prompt.py)
+│   ├── losses/      (itl.py, detect.py)
+│   ├── data/        (dataset.py, degradation.py, build_dataset.py)
+│   ├── detect/      (ice_mask.py, yolo.py, maskrcnn_adapter.py)
+│   ├── train/       (trainer.py, config.py, cli.py)
+│   ├── infer/       (cli.py)
+│   ├── eval/        (benchmark.py, downstream.py, metrics.py)
+│   └── utils/       (paths.py, seed.py)
 │
-├── phase1_initial_20260804/            # Phase 1: 初始框架 (4个脚本)
-├── phase2_clip_mamba_20260810_11/      # Phase 2: CLIP与Mamba集成 (18个脚本)
-├── phase3_multitrack_fusion_20260811_12/ # Phase 3: 多轨融合 (7个脚本)
-├── phase4_dataset_baseline_20260815/   # Phase 4: 数据集与基线 (19个脚本)
-├── phase5_hawfe_training_20260816/     # Phase 5: HA-WFE与多版本训练 (16个脚本)
-├── phase6_maskrcnn_20260817/           # Phase 6: 核心推理脚本 (1个脚本)
+├── configs/
+│   ├── train/{m1,m2,m2p,m3,m4,joint}.yaml   # 各训练模式配置
+│   ├── benchmarks.yaml                       # 公开基准 harness 配置
+│   └── hazeclip_*.yaml                       # ⚠️ 历史遗留, 见下方说明
 │
-├── ice_detection/                      # 覆冰检测附属模块 (独立)
-│   ├── algorithms/                     # 检测算法 (6个)
-│   ├── training/                       # 检测训练 (2个)
-│   ├── configs/                        # 检测配置 (3个)
-│   ├── debug/                          # 调试工具 (10个)
-│   └── reports/                        # 检测报告 (2个)
+├── tests/                              # 93 项 pytest, CPU 可跑
+├── scripts/download_weights.py         # 权重下载 + SHA256 校验
+├── docs/                               # 审计报告 + 实施记录
+│   ├── AUDIT_REPORT.md                 # 21 项代码 vs 文档审计 (本次新增)
+│   ├── IMPLEMENTATION_NOTES.md         # P0/P1 改动逐项说明
+│   └── five_way_report.txt             # 历史五路对比报告 (未改动)
 │
-├── source_dehazeformer/                # DehazeFormer 源码 (关键文件)
-├── source_hazeclip/                    # HazeCLIP 源码 (关键文件)
+├── pyproject.toml  requirements.txt  environment.yml
+├── Dockerfile.cpu  Dockerfile.gpu    .github/workflows/ci.yml
+├── LICENSE (Apache-2.0)  NOTICE.md  CITATION.cff
 │
-├── docs/                               # 文档
-│   └── five_way_report.txt             # 五路去雾对比报告
+├── source_dehazeformer/                # 历史 vendored 骨干 (P0-1a 已迁入 src)
+├── source_hazeclip/                    # 历史 HazeCLIP 副本 (教师蒸馏, 可选)
 │
-└── configs/                            # 去雾配置文件
-    ├── hazeclip_finetune.yaml          # HazeCLIP 微调配置
-    ├── hazeclip_inference.yaml         # HazeCLIP 推理配置
-    └── hazeclip_pretrain.yaml          # HazeCLIP 预训练配置
+├── phase1~phase6/                      # ⚠️ 历史开发过程目录, 仅供考古
+└── ice_detection/                      # ⚠️ 旧版检测附属模块, 见下方说明
 ```
+
+### ⚠️ 历史目录与新包的关系
+
+| 旧路径 | 替代位置 | 状态 |
+|--------|----------|------|
+| `ice_detection/algorithms/ice_mask_generator.py` | `src/icewave/detect/ice_mask.py` | 旧文件头部已加 deprecation 指向新包 |
+| `ice_detection/algorithms/yolo_auto_label.py` 等 | `src/icewave/detect/yolo.py` | 同上 |
+| `ice_detection/algorithms/maskrcnn_inference.py` | `src/icewave/detect/maskrcnn_adapter.py` | 同上 |
+| `phase5/itl_loss.py` | `src/icewave/losses/itl.py` | 修复三处 bug |
+| `phase5/ha_wfe_v2.py` / `phase4/ha_wfe.py` | `src/icewave/models/hawfe.py` | 子类化 + 修复奇数尺寸 bug |
+| `phase6/dehaze_inference.py` | `src/icewave/infer/cli.py` (`icewave-infer`) | 去除 YOLO 自动重训 |
+| `phase4~5/train_m*.py` | `src/icewave/train/cli.py` (`icewave-train`) | 配置驱动的统一入口 |
+| `configs/hazeclip_*.yaml` | `configs/train/{m3,m4,joint}.yaml` | hazeclip_*.yaml 顶部加注释 |
+
+旧目录保留以便追溯开发过程与恢复历史检查点, 但**所有新工作请在 `src/icewave/` 下进行**。
 
 ---
 
-## 使用方法
+## 3. 模型版本演进
 
-### 环境要求
+| 版本 | 名称 | 骨干 | HA-WFE | CLIP 提示 | ITL | 联合优化 | 参数量 | 相对 m1 增量 |
+|------|------|------|--------|-----------|-----|----------|--------|---------------|
+| m1 | DehazeFormer-S 基线 | S | — | — | — | — | 1.285 M | — |
+| m2 | + HA-WFE v1 | S | v1 (零初值/Tanh) | — | — | — | 1.315 M | +2.32 % |
+| m2p | + HA-WFE v2 | S | v2 (正初值/Sigmoid) | — | — | — | 1.315 M | +2.32 % |
+| m3 | + CLIP 雾提示 | S | v2 | ✓ | — | — | 1.336 M | +4.01 % |
+| m4 | + ITL 覆冰感知 | S | v2 | ✓ | ✓ | — | 1.336 M | +4.01 % |
+| **joint** | + 检测感知联合 | S | v2 | ✓ | ✓ | ✓ | 1.336 M | +4.01 % |
 
-- Python 3.10+
-- PyTorch 2.11.0+ (CUDA 12.8+ for RTX 5060/Blackwell)
-- CUDA 12.8+
-- GPU: NVIDIA RTX 5060 (8GB VRAM) 或更高
+> 参数量基于 `build_model(v)` 构造后 `sum(p.numel())` 实测; 与 README 旧版声称
+> "+10%~+15%" 不同 (旧数字未实测, 现已修正)。
+> CLIP 提示分支的投影层仅在 m3/m4/joint 中加载, m3→m4 严格模型参数量不变
+> (差异在训练流程而非参数)。
 
-### 核心依赖
+`joint` 模式是本项目面向 SCI 一区的**核心创新训练模式**: M4 + 走廊纹理保持
+损失 + Kendall & Gal 不确定性加权, 让去雾主干保留"检测关键特征", 打破"先去雾
+再检测"级联范式, 实现任务协同优化。
+
+---
+
+## 4. 三大创新模块
+
+### 4.1 HA-WFE (Haar Wavelet Feature Enhancement)
+
+瓶颈层 Haar 小波特征增强, 对四个子带差异化处理:
+
+- **LL (低频)**: SCA 通道注意力 + 可选 CLIP 雾提示调制
+- **LH/HL (中频)**: 深度可分离门控 × 残差校正
+- **HH (高频)**: 同 LH/HL 结构, 独立 α
+
+v1 (m2) 与 v2 (m2p) 的差异: v1 用零初始化 + Tanh + 共享 α, v2 用正初始化 (0.1) +
+Sigmoid 门控 + 子带独立 α。两种风格保留作消融维度。
+
+**工程修复**: 旧 `phase4/ha_wfe.py` 在奇数空间尺寸输入时会因 `F_enhanced` 已裁回
+原尺寸、`F_b` 仍为 padding 后尺寸而崩溃; 本包同步裁剪 `F_b` (偶数路径行为不变)。
+
+### 4.2 CLIP 雾提示蒸馏 (m3/m4/joint)
+
+CLIPSurgery (CS-ViT-B/32) 冻结编码雾图 → 49 个空间 token → 1×1 卷积投影为
+32 通道提示 `M_h` → 注入 HA-WFE 的 LL 分支。教师 HazeCLIP (MSBDN) 输出 L1 蒸馏
+损失, `λ_kd=0.05`。训练时 50 % prompt dropout, 推理时不需要 CLIP。
+
+**工程修复**: 旧 `train_m3.py` 只优化 `model.parameters()`, `CLIPFogPrompt.proj`
+随机初始化且永不更新; 新版 `train_prompt_proj=true` 强制投影层进入 optimizer。
+
+### 4.3 ITL 覆冰感知损失 (m4/joint)
+
+$$
+\mathcal{L}_{\text{ITL}} = \lambda_{\text{region}} \mathcal{L}_{\text{region}} + \lambda_{\text{boundary}} \mathcal{L}_{\text{boundary}}
+$$
+
+- $\mathcal{L}_{\text{region}} = \mathbb{E}_{x \in \text{ice}} \| \hat J - J \|_1 + w_{\text{ssim}} \cdot (1 - \text{SSIM}_{\text{ice}}(\hat J, J))$
+  - 冰区加权 L1 + 冰区加权 SSIM (默认 `region_term='ssim'`)
+- $\mathcal{L}_{\text{boundary}} = \mathbb{E}_{x \in \partial \text{ice}} \| \nabla \hat J - \nabla J \|_1$
+  - 边界带 (膨胀掩码减去原掩码) 上的 Sobel 梯度幅值 L1
+- 默认 `λ_region=0.5`, `λ_boundary=0.3`, `w_ssim=0.1`, 边界膨胀核 7
+
+**工程修复三处** (旧 `phase5/itl_loss.py` → 新 `src/icewave/losses/itl.py`):
+
+1. 文档声称 SSIM 区域项、实现是加权 L1 → 默认改为真 SSIM 区域项
+2. 区域损失随 batch 大小变化 (旧在 (B,3,H,W) 取均值) → 改为按"冰像素 × 通道" masked 均值
+3. 空掩码返回 `0.0` Python float, 反传时报"does not require grad" → 改为
+   `pred.sum() * 0.0` graph-connected 零张量 (任意 pred 的零倍数仍是 pred 计算图
+   的一部分, 反向传播时梯度正常累积)
+
+### 4.4 检测感知联合优化 (joint 独有)
+
+P1-1 新增, 是面向 SCI 一区的核心创新:
+
+- **复合退化物理模型** (`data/degradation.py`):
+  冰层复合 (Beer-Lambert: $\alpha = 1 - e^{-\beta d}$) → 大气散射 (Koschmieder)
+  无冰时严格退化为经典 ASM (逐字节相等, 保证与旧管线兼容)
+- **走廊纹理保持损失** (`losses/detect.py`):
+  仅在冰区膨胀走廊内最小化预测与清晰的梯度差异, 抑制走廊外过度锐化
+- **不确定性加权** (`losses/detect.py`):
+  Kendall & Gal 多任务损失可学习权重 σ, 自动平衡 recon / kd / itl / corridor 四项
+
+### 4.5 下游任务增益指标 (P1-1, eval/downstream.py)
 
 ```
-torch >= 2.11.0
-torchvision
-opencv-python
-numpy
-openpyxl
-ultralytics (YOLOv8)
-timm
+ΔmAP = mAP(hazy) − mAP(dehazed)   ←  去雾对检测的提升
+gap   = mAP(clear) − mAP(dehazed)  ←  残留性能差距
 ```
 
-### 推理命令
+回应审稿人对"PSNR 提升不等于真实价值"的质疑, 提供**任务级量化证据**。
+
+---
+
+## 5. 环境
+
+`pyproject.toml` 声明 `torch≥2.0` (含 CPU-only), 运行时根据 GPU 自动选 bf16/fp16。
+实际验证矩阵 (CI 后续补全):
+
+| 场景 | 命令 |
+|------|------|
+| CPU 开发/测试 | `pip install -e ".[dev]"` (PyTorch 官方 CPU 轮子) |
+| 单 GPU 训练 (A100/A10/V100) | `pip install torch --index-url https://download.pytorch.org/whl/cu121 && pip install -e ".[train,all]"` |
+| RTX 5090/5060 (Blackwell, sm_120) | `pip install torch --index-url https://download.pytorch.org/whl/cu128 && pip install -e ".[all]"` |
+| Conda 复现 | `conda env create -f environment.yml && conda activate icewave` |
+| Docker CPU 推理 | `docker build -f Dockerfile.cpu -t icewave:cpu .` |
+| Docker GPU 训练 | `docker build -f Dockerfile.gpu -t icewave:gpu .` |
+
+⚠️ **关于 ultralytics (YOLO)**: AGPL-3.0 许可, 学术研究使用无限制; 闭源商业分发
+需评估传染性 (见 NOTICE.md)。`pip install -e ".[detect]"` 才会安装。
+
+---
+
+## 6. 路径参数化
+
+四个环境变量, 全部可选 (缺省指向仓库内):
 
 ```bash
-# 基本去雾
-python dehaze_inference.py -i input/ -o output/
-
-# 去雾 + 覆冰检测 + 对比图 (YOLO)
-python dehaze_inference.py -i input/ -o output/ --ice-mask --compare
-
-# 使用 Mask R-CNN 替代 YOLO
-python dehaze_inference.py -i input/ -o output/ --ice-mask --compare --use-maskrcnn --no-retrain
-
-# 指定模型 (m1/m2/m2p/m3/m4)
-python dehaze_inference.py -i input/ -o output/ -m m4 --compare
+export ICEWAVE_DATA_ROOT=/path/to/data           # 数据集根
+export ICEWAVE_WEIGHTS_DIR=/path/to/weights      # 检查点/教师/检测权重
+export ICEWAVE_OUTPUT_DIR=/path/to/outputs       # 训练输出/推理输出
+export ICEWAVE_CLIP_DIR=/path/to/clip            # CLIP 缓存 (可选)
 ```
 
-### 参数说明
+YAML 配置支持 `${ICEWAVE_DATA_ROOT}/dataset` 占位符 + 缺省值 (`load_config` 自动展开)。
 
-| 参数 | 说明 |
-|------|------|
-| `-i / --input` | 输入图片路径或文件夹 |
-| `-o / --output` | 输出图片路径或文件夹 |
-| `-m / --model` | 模型选择: m1(基线), m2(HA-WFE v1), m2p(HA-WFE v2), m3(CLIP蒸馏), m4(ITL覆冰感知, 默认) |
-| `--ice-mask` | 生成覆冰区域掩码 (仅在检测到覆冰时生成) |
-| `--compare` | 生成原图 vs 去雾 vs 检测 vs 覆冰的并排对比图 |
-| `--use-maskrcnn` | 使用同事提供的 Mask R-CNN 模型替代 YOLO |
-| `--no-yolo` | 禁用 YOLO 检测 |
-| `--no-retrain` | 跳过 YOLO 自动重训 |
+---
 
-### 输出文件结构
+## 7. 快速上手
 
-```
-output/
-├── image1.png                    # 去雾后图片
-├── image1_yolo.png               # YOLO 检测标注图 (或 _maskrcnn.png)
-├── image1_ice_mask.png            # 覆冰掩码 (仅有覆冰时生成)
+### 7.1 安装
 
-compare/
-├── compare_image1.png            # 并排对比图
-
-processing_report.xlsx             # Excel 报告 (4个工作表)
+```bash
+git clone https://github.com/Kristen-net/turbo-icespoon
+cd turbo-icespoon
+pip install -e ".[all]"          # CPU/教学用; GPU 见上文矩阵
 ```
 
-### Excel 报告工作表
+### 7.2 准备数据与权重
 
-1. **处理总览** — 文件名、分辨率、亮度/对比度提升、检测器类型、覆冰判定
-2. **去雾质量指标** — 亮度、对比度、饱和度、边缘密度、暗通道、信息熵 (原图 vs 去雾后)
-3. **覆冰检测详情** — 检测器、覆冰面积比、覆冰区域数、最大覆冰区域
-4. **统计汇总** — 总图片数、覆冰图片数、检测器分布、平均值统计
+```bash
+# 1. 构造数据集 (场景级切分, 边界图默认排除)
+icewave-build-dataset --src /path/to/raw_images \
+    --out $ICEWAVE_DATA_ROOT/dataset --val-ratio 0.1
+
+# 2. 下载权重 (维护者需先在 scripts/download_weights.py 的 MANIFEST 填入 URL/SHA256)
+python scripts/download_weights.py --models m4
+# 或全量
+python scripts/download_weights.py --all
+```
+
+### 7.3 训练
+
+```bash
+icewave-train --config configs/train/m4.yaml
+# 覆盖超参: icewave-train --config configs/train/m4.yaml --override train.epochs=60
+# joint 模式: icewave-train --config configs/train/joint.yaml
+```
+
+### 7.4 评测
+
+```bash
+# 公开基准 (RESIDE-SOTS 等)
+icewave-eval-benchmark --config configs/benchmarks.yaml --models m4 \
+    --benchmarks reside_sots_indoor
+
+# 下游增益指标 (同一检测器在 hazy / dehazed / clear 三套图上的 mAP 差)
+icewave-eval-downstream --detector yolo --detector-weights weights/yolo/power_line_best.pt \
+    --hazy-dir $ICEWAVE_DATA_ROOT/val/hazy \
+    --clear-dir $ICEWAVE_DATA_ROOT/val/clear \
+    --dehaze-model m4
+```
+
+### 7.5 推理
+
+```bash
+# 仅去雾
+icewave-infer --input data/test/hazy --model m4
+
+# 去雾 + 覆冰检测 (YOLO) + 规则冰掩码 + 对比图
+icewave-infer --input data/test/hazy --model m4 \
+    --detector yolo --detector-weights weights/yolo/power_line_best.pt \
+    --conf 0.25
+
+# 使用 Mask R-CNN 替代 YOLO (语义与覆冰对齐未经人工校验, 见 docs/IMPLEMENTATION_NOTES.md §4)
+icewave-infer --input data/test/hazy --model m4 \
+    --detector maskrcnn --detector-weights weights/maskrcnn/model_0004999.pth
+```
+
+### 7.6 输出结构
+
+```
+<ICEWAVE_OUTPUT_DIR>/infer/
+├── dehazed/         # 去雾图
+├── ice_mask/        # 规则式冰掩码 (去雾图上; 伪标签, 论文指标应以人工标注为准)
+├── annotated/       # YOLO/MaskRCNN 标注图
+├── compare/         # 原图 | 去雾 并排对比
+└── report.csv       # 每图检测数 + 冰覆盖率
+```
+
+### 7.7 测试
+
+```bash
+pytest tests/ -v   # 93 项, CPU 即可
+```
 
 ---
 
-## 关键技术决策与经验
+## 8. 模型权重
 
-### 环境适配
-- PyTorch 1.13.1+cpu 升级至 2.11.0+cu128 以支持 RTX 5060 (Blackwell, compute 12.0)
-- mamba_ssm CUDA 内核无法在 Windows 编译; 纯 PyTorch 实现导致去雾性能显著下降 (输出近似恒等映射)
-- PyTorch 2.6+ 修改了 torch.load 默认为 weights_only=True; 加载旧 checkpoint 需添加 weights_only=False
+仓库不分发权重, 通过 `scripts/download_weights.py` 下载并做 SHA256 校验。
+维护者需将权重托管到下列任一位置, 并填入脚本的 `MANIFEST`:
 
-### 训练策略
-- CLIP 雾提示注入需要 Prompt dropout (50%) 避免 train-test gap; 不加 dropout 会导致 PSNR 下降
-- Prompt dropout + 低学习率 (5e-5) 稳定训练, 使模型在有/无 CLIP 提示时均表现良好
-- HazeCLIP 教师模型训练时冻结, 推理时移除
-- HA-WFE 高频子带在合成雾数据上激活极少; 真实雾数据可能需要调整初始化 (非零) 或移除 Tanh 约束
+- GitHub Releases (与本仓库绑定)
+- HuggingFace Hub (推荐, 可挂项目页)
+- Zenodo (数据集 DOI)
 
-### 检测算法
-- YOLO 自动标注使用 HSV 颜色 + Canny 边缘 + Hough 直线 + 纹理过滤的组合策略
-- 覆冰检测采用走廊约束 (YOLO power_line/insulator 区域) + 白色特征 + 中等纹理的 AND 逻辑
-- Mask R-CNN 权重从 detectron2 迁移到 torchvision, 需手动键名映射 (FPN层、ROI Head等)
-- Mask R-CNN 分数饱和问题通过 NMS 去重 (IoU=0.3) + 面积过滤 (>200px) + 限制每图20个检测来缓解
-- CLIPSurgery (CS-ViT-B/32) 返回空间特征 [B, 50, 512] (1 CLS + 49 spatial); 常规 CLIP 仅返回 [B, 512]
+| 权重 | 大小 | 用途 |
+|------|------|------|
+| `checkpoints/{m1..m4,joint}_best.pth` | ~5–15 MB | 各版本去雾检查点 |
+| `hazeclip/model.pth` | ~108 MB | HazeCLIP 教师 (m3/m4/joint 蒸馏用) |
+| `yolo/power_line_best.pt` | ~5.9 MB | YOLOv8 覆冰/线路检测 (AGPL-3.0) |
+| `maskrcnn/model_0004999.pth` | ~335 MB | Mask R-CNN 迁移权重 (语义未对齐) |
 
-### 部署优化
-- RTX 5060 8GB VRAM 需要 bf16、梯度检查点和分块推理
-- dehaze_inference.py 通过文件哈希清单自动触发 YOLO 重训 (增量数据 + 迁移学习, 20 epochs)
-- --ice-mask 参数仅在检测到覆冰时生成掩码 (非覆冰情况不生成黑色图片)
+URL/SHA256 占位符需维护者填写 (审计编号 M1/M6)。
 
 ---
 
-## 模型权重说明
+## 9. 许可证与第三方归属
 
-以下模型权重因体积较大未包含在仓库中，需单独获取：
+- **本项目**: Apache-2.0 (见 `LICENSE`)
+- **DehazeFormer 骨干** (`src/icewave/models/dehazeformer.py`): BSD-3-Clause, vendored 自 [cecid3/DehazeFormer](https://github.com/cecid3/DehazeFormer), 仅做 timm API 兼容性修改
+- **HazeCLIP 教师** (`source_hazeclip/`): 副本不完整, 使用前需补全 `build_model.py` / `simple_tokenizer.py`; 上游许可需查阅原仓库
+- **ultralytics (YOLO)**: AGPL-3.0; 学术研究无限制, 闭源商业分发需评估
+- **公开数据集** (RESIDE / O-HAZE / I-HAZE): 各自数据使用条款, 本项目不分发
 
-| 模型 | 文件 | 大小 | 说明 |
-|------|------|------|------|
-| HazeCLIP | model.pth | ~108MB | HazeCLIP 教师模型 |
-| Mask R-CNN | model_0004999.pth | ~335MB | detectron2 权重 |
-| M1~M4 | m{1,2,2p,3,4}_best.pth | 5.6~15.6MB | IceWave 各版本检查点 |
-| DehazeFormer | dehazeformer.pth | ~5.7MB | DehazeFormer 预训练权重 |
-| YOLOv8 | best.pt / last.pt | ~5.9MB | YOLO 电力线检测权重 |
-| YOLOv8n | yolov8n.pt | ~6.2MB | YOLOv8n 预训练权重 |
+详见 `NOTICE.md`。
 
 ---
 
-## 相关技术文档
+## 10. 引用
 
-- DehazeFormer: https://github.com/cecid3/DehazeFormer
-- HazeCLIP: https://github.com/cuaecc/HazeCLIP
-- CLIPSurgery: https://github.com/leonardopinto/clipsurgery
+```bibtex
+@software{icewave_dehazeformer_2026,
+  author = {Kristen-net},
+  title  = {IceWave-DehazeFormer: Ice-Aware Dehazing for Transmission-Line Inspection},
+  year   = {2026},
+  url    = {https://github.com/Kristen-net/turbo-icespoon}
+}
+```
 
 ---
 
-## 作者
+## 11. 引用本工作
 
-Kristen-net (https://github.com/Kristen-net)
+作者: [Kristen-net](https://github.com/Kristen-net) (GitHub: Kristen-net)
+若本工作对你的研究有帮助, 欢迎引用 (见 `CITATION.cff`)。
 
-## 许可证
+---
 
-本项目仅供学术研究使用。
+## 12. 已知风险与下一步
+
+1. **权重托管 URL/SHA256 待维护者填写** (审计 M1/M6)
+2. **HazeCLIP 副本不完整** (审计 M2/NOTICE.md §3), m3/m4/joint 训练前需补全
+3. **Mask R-CNN 类别语义** (target 与覆冰对应未经人工校验)
+4. **ultralytics AGPL** (商业闭源分发需评估)
+5. **审计报告 21 项中 19 项随本 README 修复**, M1/M2/M5 三项需维护者介入 (见 `docs/AUDIT_REPORT.md`)
+
+完整审计详见 `docs/AUDIT_REPORT.md`, 实施记录详见 `docs/IMPLEMENTATION_NOTES.md`。

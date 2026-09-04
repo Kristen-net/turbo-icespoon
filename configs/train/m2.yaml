@@ -1,0 +1,41 @@
+# m2 (HA-WFE v1, 零初始化 + Tanh + 共享 alpha)
+#
+# 与 m2p.yaml 的差异: 仅 model.version 由 'm2p' 改为 'm2'。
+# m2 对应旧 phase4/ha_wfe.py (Tanh 激活 + 共享 alpha);
+# m2p 对应旧 phase5/ha_wfe_v2.py (Sigmoid 激活 + 子带独立 alpha)。
+# 实际模型参数量二者相同, 但训练后权重数值行为不同, 故二者各保留配置。
+#
+# 使用: icewave-train --config configs/train/m2.yaml
+
+seed: 42
+deterministic: false
+
+model:
+  version: m2        # m1/m2/m2p/m3/m4/joint
+  backbone: s        # s/t/b
+  # init_checkpoint: ${ICEWAVE_WEIGHTS_DIR}/checkpoints/m1_best.pth
+
+data:
+  root: ${ICEWAVE_DATA_ROOT}/dataset   # 需包含 train/ val/ 子目录
+  patch_size: 192
+
+train:
+  epochs: 30
+  batch_size: 4
+  lr: 1.0e-4
+  weight_decay: 1.0e-4
+  num_workers: 0
+  grad_clip: 0.0
+  # m2 不启用 CLIP 提示分支 (prompt_channels=0), 以下两项无作用, 留作模板
+  prompt_drop_prob: 0.0
+  train_prompt_proj: false
+
+losses:
+  lambda_l1: 1.0
+  lambda_ssim: 0.1
+  # m2 不含 CLIP 教师蒸馏与 ITL 覆冰感知, 以下三项无作用
+  lambda_kd: 0.0
+  lambda_itl: 0.0
+  itl_lambda_region: 0.0
+  itl_lambda_boundary: 0.0
+  itl_region_term: l1

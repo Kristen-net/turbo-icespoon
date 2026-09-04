@@ -3,8 +3,10 @@ cff-version: 1.2.0
 message: "如果本工作对你的研究有帮助, 请引用。"
 title: "IceWave-DehazeFormer: Ice-Aware Dehazing for Transmission-Line Inspection"
 authors:
-  - family-names: "IceWave"
-    given-names: "Contributors"
+  - family-names: "Kristen-net"
+    given-names: ""
+    affiliation: "GitHub: Kristen-net"
+    orcid: ""
 version: 0.2.0
 date-released: 2026-09-02
 keywords:
@@ -14,3 +16,5 @@ keywords:
   - wavelet frequency enhancement
   - deep learning
 license: Apache-2.0
+url: "https://github.com/Kristen-net/turbo-icespoon"
+repository-code: "https://github.com/Kristen-net/turbo-icespoon"
