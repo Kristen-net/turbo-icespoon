@@ -20,6 +20,9 @@ jobs:
         run: pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
       - name: Install (no extras)
         run: pip install -e .
+      - name: Install pytest (for tests/)
+        # pytest 在 [dev] extra, test-base job 不装 extras, 故显式安装
+        run: pip install pytest pytest-cov
       - name: Run tests
         run: pytest tests/ -q
 

@@ -41,7 +41,7 @@ class TestITLFixes:
         empty = torch.zeros(1, 1, 64, 64)
         loss_fn = ITLLoss()
         r, b, t = loss_fn(pred.requires_grad_(True), clear, empty)
-        assert float(t) == 0.0
+        assert float(t.detach()) == 0.0  # detach 避免 requires_grad→scalar 警告
         t.backward()  # 不应抛 "does not require grad"
         assert pred.grad is not None
 
