@@ -1,5 +1,11 @@
 # IceWave-DehazeFormer
 
+[![CI](https://github.com/Kristen-net/turbo-icespoon/actions/workflows/ci.yml/badge.svg)](https://github.com/Kristen-net/turbo-icespoon/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+[![Python](https://img.shields.io/badge/Python-≥3.10-blue.svg)](https://www.python.org/)
+[![Tests](https://img.shields.io/badge/Tests-103%20passed-brightgreen.svg)](#6-测试)
+[![PyTorch](https://img.shields.io/badge/PyTorch-≥2.0-ee4c2c.svg)](https://pytorch.org/)
+
 > 雾天输电线路去雾与覆冰检测研究框架 · 面向 SCI 一区投稿目标的工程化重构与创新改造
 > Apache-2.0 | PyTorch ≥ 2.0 | Python ≥ 3.10
 
