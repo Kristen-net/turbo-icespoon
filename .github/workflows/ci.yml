@@ -26,26 +26,7 @@ jobs:
         # 锁 pytest<9 + iniconfig<2: pytest 9.x + iniconfig 2.x 触发 SectionWrapper ImportError.
         run: pip install "pytest>=7.4,<9" "pytest-cov>=4.0,<7" "iniconfig>=1.0,<2"
       - name: Run tests
-        # 失败时把 pytest 日志 base64 后经 ::error:: 打到 GitHub annotation
-        # (annotation 无需登录即可通过 check-runs API 读取, 供远程/审计定位 collect 错误).
-        run: |
-          set +e
-          pytest tests/ -q 2>&1 | tee /tmp/test.log
-          rc=${PIPESTATUS[0]}
-          if [ $rc -ne 0 ]; then
-            echo "::group::pytest failure tail"
-            grep -E "FAILED|ERROR|error:|assert|Exception|Traceback" /tmp/test.log | head -40
-            echo "::endgroup::"
-            python - <<'PY'
-import base64, pathlib
-p = pathlib.Path('/tmp/test.log')
-txt = p.read_text(errors='replace')[-12000:]
-b = base64.b64encode(txt.encode()).decode()
-for i in range(0, len(b), 5500):
-    print("::error::B64LOG " + b[i:i+5500])
-PY
-          fi
-          exit $rc
+        run: pytest tests/ -q
 
   test-dev:
     runs-on: ubuntu-latest

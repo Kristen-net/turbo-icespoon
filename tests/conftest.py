@@ -10,8 +10,12 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SRC = REPO_ROOT / "src"
-if str(SRC) not in sys.path:
-    sys.path.insert(0, str(SRC))
+# 同时注入仓库根路径: 使 `from tests.conftest import ...` 在 pytest 以 `tests/` 为
+# 收集参数时也能解析 (python -m pytest 会把 cwd 加入 sys.path, 直接 pytest 不会,
+# 导致 CI 上 collect 阶段 ModuleNotFoundError: No module named 'tests' → exit code 2).
+for p in (str(SRC), str(REPO_ROOT)):
+    if p not in sys.path:
+        sys.path.insert(0, p)
 
 
 def load_module_from_file(name: str, rel_path: str):
