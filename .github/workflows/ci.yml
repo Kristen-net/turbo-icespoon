@@ -33,16 +33,22 @@ jobs:
           set +e
           pytest tests/ -v --tb=short --color=no > /tmp/test.log 2>&1
           rc=$?
+          # 把 pytest 输出写入 step summary (公开可读, 无需登录 GitHub)
+          {
+            echo "## pytest output"
+            echo ""
+            echo '```'
+            tail -100 /tmp/test.log
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
           exit $rc
       - name: Show failed tests on CI failure
         if: failure()
         run: |
-          echo "::group::pytest failed tests"
-          grep -E "FAILED|ERROR " /tmp/test.log | head -30 || true
-          echo "::group::Last 60 lines of pytest output"
-          tail -60 /tmp/test.log
+          echo "::group::FAILED test summary"
+          grep -E "FAILED" /tmp/test.log | head -30 || true
           echo "::endgroup::"
-          echo "::error::pytest exit=$? — see groups above"
+          echo "::error::see step summary for pytest traceback"
 
   test-dev:
     runs-on: ubuntu-latest
