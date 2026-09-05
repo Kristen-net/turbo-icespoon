@@ -26,7 +26,17 @@ jobs:
         # CI runner 默认装最新 pytest 会触发 ImportError → exit 2.
         run: pip install "pytest<9" "pytest-cov<7" iniconfig
       - name: Run tests
-        run: pytest tests/ -q
+        run: |
+          set +e
+          pytest tests/ -v --tb=long 2>&1 | tee pytest_output.log
+          rc=${PIPESTATUS[0]}
+          exit $rc
+      - name: Upload pytest logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-logs-run-${{ github.run_id }}
+          path: pytest_output.log
 
   test-dev:
     runs-on: ubuntu-latest
