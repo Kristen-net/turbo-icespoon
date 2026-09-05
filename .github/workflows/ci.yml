@@ -21,10 +21,12 @@ jobs:
       - name: Install (no extras)
         run: pip install -e .
       - name: Install pytest (for tests/)
-        # pytest 在 [dev] extra, test-base job 不装 extras, 故显式安装
-        run: pip install pytest pytest-cov
+        # pytest 在 [dev] extra, test-base job 不装 extras, 故显式安装.
+        # 锁定 pytest<9: pytest 9.x 与 iniconfig 2.x 不兼容 (legacypath 模块 ImportError),
+        # CI runner 默认装最新 pytest 会触发 ImportError → exit 2.
+        run: pip install "pytest<9" "pytest-cov<7" iniconfig
       - name: Run tests
-        run: pytest tests/ -v --tb=short -p no:cacheprovider
+        run: pytest tests/ -q
 
   test-dev:
     runs-on: ubuntu-latest
