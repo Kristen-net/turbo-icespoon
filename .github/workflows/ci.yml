@@ -5,8 +5,9 @@ on:
     branches: [ main, develop, 'feature/**' ]
   pull_request:
 
-# P0-2c 重构后: 按可选依赖分两条流水线, 默认 path 跑最快 (CI 主链路),
+# P0-2c 重构后: 按可选依赖分多条流水线, 默认 path 跑最快 (CI 主链路),
 # detect path 需 ~600MB ultralytics, 单独跑且用 nightly smoke 避免慢测试.
+# test-base 是其它 job 的前置 (needs: test-base).
 jobs:
   test-base:
     runs-on: ubuntu-latest
@@ -20,35 +21,19 @@ jobs:
         run: pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
       - name: Install (no extras)
         run: pip install -e .
-      - name: Install pytest (for tests/)
-        # pytest 在 [dev] extra, test-base job 不装 extras, 故显式安装.
-        # 锁定 pytest 8.x (避开 pytest 9.x + iniconfig 2.x 不兼容 bug).
+      - name: Install pytest (test runner)
+        # pytest 不在 [project] extras 中, 故 test-base job 显式安装.
+        # 锁 pytest<9 + iniconfig<2: pytest 9.x + iniconfig 2.x 触发 SectionWrapper ImportError.
         run: pip install "pytest>=7.4,<9" "pytest-cov>=4.0,<7" "iniconfig>=1.0,<2"
       - name: Run tests
+        # tee 输出到 $GITHUB_STEP_SUMMARY (公开可见, 无需登录 GitHub),
+        # 失败时审计方/作者都能在 Actions 页看到具体 FAILED 测试名而非盲目 exit code.
         run: |
-          echo "::group::Versions & imports"
-          python -c "import sys, pytest, iniconfig, torch, numpy; print(f'python={sys.version.split()[0]} pytest={pytest.__version__} iniconfig={iniconfig.__version__} torch={torch.__version__} numpy={numpy.__version__}')"
-          python -c "import icewave; print('icewave import OK')"
-          echo "::endgroup::"
           set +e
-          pytest tests/ -v --tb=short --color=no > /tmp/test.log 2>&1
-          rc=$?
-          # 把 pytest 输出写入 step summary (公开可读, 无需登录 GitHub)
-          {
-            echo "## pytest output"
-            echo ""
-            echo '```'
-            tail -100 /tmp/test.log
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
+          pytest tests/ -q 2>&1 | tee /tmp/test.log
+          rc=${PIPESTATUS[0]}
+          tail -40 /tmp/test.log >> "$GITHUB_STEP_SUMMARY"
           exit $rc
-      - name: Show failed tests on CI failure
-        if: failure()
-        run: |
-          echo "::group::FAILED test summary"
-          grep -E "FAILED" /tmp/test.log | head -30 || true
-          echo "::endgroup::"
-          echo "::error::see step summary for pytest traceback"
 
   test-dev:
     runs-on: ubuntu-latest
