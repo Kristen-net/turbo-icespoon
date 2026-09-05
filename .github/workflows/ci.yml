@@ -22,21 +22,15 @@ jobs:
         run: pip install -e .
       - name: Install pytest (for tests/)
         # pytest 在 [dev] extra, test-base job 不装 extras, 故显式安装.
-        # 锁定 pytest<9: pytest 9.x 与 iniconfig 2.x 不兼容 (legacypath 模块 ImportError),
-        # CI runner 默认装最新 pytest 会触发 ImportError → exit 2.
-        run: pip install "pytest<9" "pytest-cov<7" iniconfig
+        # 锁定 pytest 8.x (避开 pytest 9.x + iniconfig 2.x 不兼容 bug).
+        run: pip install "pytest>=7.4,<9" "pytest-cov>=4.0,<7" "iniconfig>=1.0,<2"
       - name: Run tests
         run: |
-          set +e
-          pytest tests/ -v --tb=long 2>&1 | tee pytest_output.log
-          rc=${PIPESTATUS[0]}
-          exit $rc
-      - name: Upload pytest logs on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: pytest-logs-run-${{ github.run_id }}
-          path: pytest_output.log
+          echo "::group::Versions & imports"
+          python -c "import sys, pytest, iniconfig, torch, numpy; print(f'python={sys.version.split()[0]} pytest={pytest.__version__} iniconfig={iniconfig.__version__} torch={torch.__version__} numpy={numpy.__version__}')"
+          python -c "import icewave; print('icewave import OK')"
+          echo "::endgroup::"
+          pytest tests/ -v --tb=long 2>&1
 
   test-dev:
     runs-on: ubuntu-latest
