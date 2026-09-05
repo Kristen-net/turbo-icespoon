@@ -24,7 +24,7 @@ jobs:
         # pytest 在 [dev] extra, test-base job 不装 extras, 故显式安装
         run: pip install pytest pytest-cov
       - name: Run tests
-        run: pytest tests/ -q
+        run: pytest tests/ -v --tb=short -p no:cacheprovider
 
   test-dev:
     runs-on: ubuntu-latest
