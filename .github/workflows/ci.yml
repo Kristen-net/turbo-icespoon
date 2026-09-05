@@ -30,7 +30,19 @@ jobs:
           python -c "import sys, pytest, iniconfig, torch, numpy; print(f'python={sys.version.split()[0]} pytest={pytest.__version__} iniconfig={iniconfig.__version__} torch={torch.__version__} numpy={numpy.__version__}')"
           python -c "import icewave; print('icewave import OK')"
           echo "::endgroup::"
-          pytest tests/ -v --tb=long 2>&1
+          set +e
+          pytest tests/ -v --tb=short --color=no > /tmp/test.log 2>&1
+          rc=$?
+          exit $rc
+      - name: Show failed tests on CI failure
+        if: failure()
+        run: |
+          echo "::group::pytest failed tests"
+          grep -E "FAILED|ERROR " /tmp/test.log | head -30 || true
+          echo "::group::Last 60 lines of pytest output"
+          tail -60 /tmp/test.log
+          echo "::endgroup::"
+          echo "::error::pytest exit=$? — see groups above"
 
   test-dev:
     runs-on: ubuntu-latest
