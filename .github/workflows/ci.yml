@@ -60,6 +60,9 @@ jobs:
       - name: Install with [detect] extra (smoke import)
         run: pip install -e ".[detect]" --no-deps || true
         # --no-deps 因为 CI 已先装 torch + opencv; ultralytics 自带依赖装一次看是否可获取即可。
+      - name: Install pytest (test runner)
+        # 本 job 不装 [dev] extra, pytest 需显式安装; 锁 <9 避免 iniconfig 2.x ImportError.
+        run: pip install "pytest>=7.4,<9" "iniconfig>=1.0,<2"
       - name: Detect smoke tests (no ultralytics required)
         run: pytest tests/test_detect_yolo.py -v
 
