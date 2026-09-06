@@ -1,0 +1,39 @@
+# W5 正式训练配置: joint_v2 双阶段
+# RTX 5060 8.5GB VRAM, 200+100 合成数据
+# 预计: Stage-A ~5min + Stage-B ~15min
+model:
+  version: joint_v2
+  backbone: s
+  init_checkpoint: null
+  detector_weights: null  # Stub 模式
+
+data:
+  root: data/synthetic_full
+  patch_size: 128
+  with_bboxes: true
+
+train:
+  batch_size: 8
+  num_workers: 0
+  prompt_drop_prob: 1.0
+  stages:
+    warm_up:
+      epochs: 5
+      lr: 1.0e-4
+    joint:
+      epochs: 15
+      lr: 5.0e-5
+      grad_clip: 10.0
+
+losses:
+  K: 5
+  lambda_recon_l1: 1.0
+  lambda_recon_ssim: 0.1
+  lambda_box_feat: 0.5
+  lambda_detect: 0.2
+  lambda_box_align: 0.5
+  lambda_ice_phys: 0.3
+  box_feat_type: detector
+  detect_tau_cls: 0.01
+  s_init: 0.0
+  s_clamp: [-6.0, 6.0]

@@ -1,0 +1,22 @@
+# 消融实验 3: 级联基线 (M4 去雾 → YOLO 检测, 无联合优化)
+# 只训练 M4 去雾模型, 无检测感知损失
+model:
+  version: m4
+  backbone: s
+  init_checkpoint: null
+
+data:
+  root: data/synthetic_full
+  patch_size: 128
+
+train:
+  batch_size: 4
+  num_workers: 0
+  prompt_drop_prob: 1.0
+  epochs: 48  # 总 epoch = Stage-A + Stage-B
+  lr: 1.0e-4
+  grad_clip: 10.0
+
+losses:
+  lambda_l1: 1.0
+  lambda_ssim: 0.1
