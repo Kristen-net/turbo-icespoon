@@ -516,10 +516,26 @@ class Trainer:
                            self.ckpt_dir / "joint_v2_best.pth")
 
         # ==================== Stage-B: joint ====================
-        print(f"  [Stage-B] joint {joint_cfg['epochs']} epochs, "
-              f"backbone 冻结, neck+head 微调")
+        freeze_dehaze_backbone = tcfg.get("freeze_dehaze_backbone", False)
+        if freeze_dehaze_backbone:
+            encoder_prefixes = (
+                "patch_embed.", "layer1.", "layer2.", "layer3.",
+                "patch_merge1.", "patch_merge2.", "skip1.", "skip2.",
+            )
+            for name, param in model.named_parameters():
+                if any(name.startswith(p) for p in encoder_prefixes):
+                    param.requires_grad_(False)
+            n_frozen = sum(1 for n, p in model.named_parameters()
+                           if not p.requires_grad)
+            n_total = sum(1 for _ in model.named_parameters())
+            print(f"  [Stage-B] joint {joint_cfg['epochs']} epochs, "
+                  f"dehaze backbone frozen ({n_frozen}/{n_total} params), "
+                  f"decoder+hawfe+head+detector neck 微调")
+        else:
+            print(f"  [Stage-B] joint {joint_cfg['epochs']} epochs, "
+                  f"backbone 冻结, neck+head 微调")
         joint_lr = joint_cfg.get("lr", 5e-5)
-        joint_params = list(model.parameters())
+        joint_params = [p for p in model.parameters() if p.requires_grad]
         if prompt_extractor is not None:
             joint_params += list(prompt_extractor.proj.parameters())
         joint_params += list(detector.trainable_parameters)

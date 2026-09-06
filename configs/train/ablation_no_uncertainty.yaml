@@ -1,5 +1,5 @@
-# 消融实验 2: 去掉不确定性加权 (固定 lambda)
-# 用固定权重替代 learned s_i, 其他不变
+# 消融实验 2: 固定权重 (关闭不确定性加权, s_clamp=[0,0])
+# s_clamp=[0,0] 强制 s=0, 即所有损失权重固定为 lambda_*, 不学习
 model:
   version: joint_v2
   backbone: s
@@ -35,4 +35,4 @@ losses:
   box_feat_type: detector
   detect_tau_cls: 0.01
   s_init: 0.0
-  s_clamp: [0.0, 0.0]  # ← 消融: 固定 s=0 (权重=1.0, 无学习)
+  s_clamp: [0.0, 0.0]  # ← 消融: 固定权重, s 不能偏移

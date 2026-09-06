@@ -1,7 +1,6 @@
-# 级联基线 (M4→YOLO, uncoupled)
-# 文档 6.4 结果表中的独立对比行: Cascade (M4→YOLO, uncoupled)
-# 关闭所有检测相关损失, 仅保留重建损失, 等价于 M4 独立去雾后级联检测
-# R ≈ 0.37 是 Joint 的对比基准
+# 消融实验 3: 冻结去雾主干 (encoder layers 1-3 + patch_embed + merges)
+# 文档 W5: "冻结主干" 消融 - Stage-B 冻结编码器, 仅微调解码器+hawfe+head
+# 测试编码器联合优化是否必要
 model:
   version: joint_v2
   backbone: s
@@ -17,6 +16,7 @@ train:
   batch_size: 4
   num_workers: 0
   prompt_drop_prob: 1.0
+  freeze_dehaze_backbone: true  # ← 消融: Stage-B 冻结编码器
   stages:
     warm_up:
       epochs: 8
@@ -30,9 +30,9 @@ losses:
   K: 5
   lambda_recon_l1: 1.0
   lambda_recon_ssim: 0.1
-  lambda_box_feat: 0.0    # 无框内特征保持
-  lambda_detect: 0.0      # 无可检测性损失
-  lambda_box_align: 0.0   # 无框对齐损失
+  lambda_box_feat: 0.5
+  lambda_detect: 0.2
+  lambda_box_align: 0.5
   lambda_ice_phys: 0.3
   box_feat_type: detector
   detect_tau_cls: 0.01
