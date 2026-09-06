@@ -1,10 +1,10 @@
 # turbo-icespoon (IceWave) 代码审查报告
 
-> **审查对象**: https://github.com/Kristen-net/turbo-icespoon @ commit `99f59ad`
+> **审查对象**: https://github.com/Kristen-net/turbo-icespoon @ commit `11e52df`（含本报告提交 = `ca9b27a`）
 > **审查基线**: 相对原项目（vendored DehazeFormer + HazeCLIP）的全部自有改动
-> **审查方式**: 全量人工阅读 `src/icewave/**` + 关键路径本地复现验证（Python 3.11 venv, torch 2.14 CPU）
+> **审查方式**: 全量人工阅读 `src/icewave/**` + `scripts/` + 关键路径本地复现验证（Python 3.11 venv, torch 2.14 CPU）
 > **审查日期**: 2026-09-07
-> **结论速览**: 工程化质量**总体优秀**（分层清晰/文档密度高/96 个测试函数/CI 四 job 全绿），但发现 **1 个 P0 级训练正确性 bug（已复现）**、4 个 P1 级缺陷，须在真实训练启动（P0-3/P0-4/P1-1）前修复。
+> **结论速览**: 工程化质量**总体优秀**（分层清晰/文档密度高/146 个测试/CI 四 job），但发现 **2 个 P0 级训练正确性 bug（均已本地实证）**、5 个 P1 级缺陷。⚠️ **P0-1 与 P0-2 共同意味着：W5 跑出的 joint_v2 训练结果（Best PSNR=18.90）与消融结论（"检测感知损失损害泛化"）均不可作为论文证据，须修复后重训。**
 
 ---
 
@@ -82,6 +82,25 @@
 
 `paths.py`（5 个 `ICEWAVE_*` 环境变量三级解析）、`seed.py`（worker_init_fn 齐全）；CI 4-job 分层（base→dev/detect/clis，needs 依赖正确）；Docker 双镜像；CITATION.cff；NOTICE.md 许可声明完整（BSD-3/AGPL/OpenAI 权重均如实标注）。
 
+### 2.8 A2/W2–W6 增量提交（`0223bb7`…`11e52df`，+5800 行）
+
+按 JOINT_OPTIMIZATION_FRAMEWORK 落地的第一批实现：
+
+| 文件 | 内容 | 评价 |
+|------|------|------|
+| `models/detector_wrapper.py` | Stub/YOLOv8 双模式检测器封装（冻结 backbone） | ⚠️ 结构清晰但存在 P0-2 梯度死路与 P2-5 解析错误 |
+| `losses/detect.py`（+391 行） | BoxFeaturePreservation / Detectability / BoxAlign(CIoU+DFL) / IcePhysical + σ clamp | 数值实现好，但整条链被 P0-2 废掉梯度 |
+| `train/trainer.py`（+300 行） | `train_joint_v2` 双阶段（Stage-A warm-up + Stage-B joint, K=5） | 流程完整；`batch[-2]/batch[-1]` 取 bbox 的索引约定略脆弱 |
+| `data/dataset.py`（+105 行） | `return_bboxes` + YOLO 标签读取 | ⚠️ 引入第四路裁剪错位（见 P0-1） |
+| `data/degradation.py`（+155 行） | 镜面反射/各向异性模糊/morphology 字段 | 元数据 A bug（P1-1）未修 |
+| `eval/downstream.py`（+143 行） | gain_stats/雾档分组/成对 t 检验 | ⚠️ scipy 未声明（P1-5） |
+| `scripts/run_*.py` ×8 + `run_ablation_chain.ps1` | W5 训练/消融/评估一次性脚本 | ⚠️ 硬编码绝对路径回归（P2-6） |
+| `reports/w5-experiment-report.html` | W5 消融分析（PSNR 曲线/AP/雷达图） | 呈现质量高，但底层实验受 P0-1/P0-2 混杂 |
+| `docs/paper/section_3_2/3_3/4_3.md` | 论文正文三节 | 与代码同步意识好；数字须待重跑 |
+| `configs/train/*.yaml` ×8 | joint_v2/消融/smoke 配置 | 配置齐全 |
+
+**总评**：A2 提交的**框架完整性与测试数量**（+50 测试）值得肯定，但两个 P0 级正确性 bug 都藏在这批新代码中，且恰好破坏了它要证明的核心主张——**实现速度快于验证深度**的典型症状。
+
 ---
 
 ## 3. 代码质量评估
@@ -123,7 +142,48 @@
 > 严重度：**P0 = 影响训练正确性必须先修**；P1 = 功能性缺陷；P2 = 边界/健壮性；P3 = 卫生问题。
 > 标注 ✅ 已复现 的条目附验证脚本（§6）。
 
-### P0-1（✅ 已复现）训练模式 hazy/clear/ice 三次裁剪互不对齐 —— **监督信号被破坏**
+### P0-2（✅ 已实证）检测感知三损失对去雾主干的梯度全部被切断 —— joint_v2 "端到端联合优化"实际未发生
+
+**位置**: `src/icewave/models/detector_wrapper.py:239-270`（新增于 A2-W2 提交 `0223bb7`）
+
+两处叠加导致 L2/L3/L4 对去雾网络 **梯度恒为零**：
+
+```python
+def extract_neck_features(self, img):        # L2 (BoxFeat) 调用路径
+    with torch.no_grad():                    # ← 整条特征提取包进 no_grad
+        feats = self.backbone(img)
+    ...
+    return feats                             # YOLOv8 路径: 已 detach
+
+def forward(self, img):                      # L3/L4 (Detectability/BoxAlign) 调用路径
+    feats = self.backbone(img)
+    if not any(p.requires_grad for p in self.backbone.parameters()):
+        feats = [f.detach() for f in feats]  # ← backbone 冻结 ⇒ 显式 detach
+    return self.neck(feats)
+```
+
+"冻结检测器 backbone 参数"（`requires_grad_(False)`）本不影响 **梯度对输入图像** 的回传——autograd 对输入仍建图。但代码误以为冻结即断链，又主动 `detach()`，把唯一通往去雾网络 `pred` 的梯度路径杀死了。
+
+**本地实证输出**（Stub 模式，`freeze_backbone=True`，与本仓库 `joint_v2_train.yaml`/`smoke_test.yaml` 配置一致）：
+
+```
+L2 (BoxFeat)        pred.grad 存在但范数 = 0.0   ← graph-connected 零主导, 检测路径零贡献
+L3 (Detectability)  pred.grad is None            ← 无计算图
+L4 (BoxAlign)       pred.grad is None            ← 无计算图
+neck 参数            有非零梯度                    ← 损失只在训练检测器 neck
+```
+
+**影响链**（严重）：
+1. W5 joint_v2 训练中，Stage-B 去雾主干实际只被 L1（重建）更新——**论文 §3.2 的核心主张（检测梯度指导去雾）在代码层面未发生**；
+2. 消融组间差异并非来自检测感知损失（它们梯度为零），而来自不确定性加权对 L1 有效权重的间接扰动 + 随机性——`reports/w5-experiment-report.html` 的"检测感知损失损害泛化"结论**不可信**；
+3. 若照此写论文，审稿人复现代码即穿帮。
+
+**修复**（~15 行）：
+- `extract_neck_features` 去掉 `no_grad` 包裹；锚点侧（clear 图特征）可用 `torch.no_grad()` 单独处理；
+- `forward` 删除 `detach()` 分支（冻结参数本身已足够阻止 backbone 权重更新）;
+- 补测试：`loss.backward() 后 pred.grad.norm() > 0`（当前 17 个 detect loss 测试全部只断言数值，无一个断言梯度可达）。
+
+### P0-1（✅ 已复现，且被新提交放大）训练模式 hazy/clear/ice/bbox 四路裁剪互不对齐 —— 监督信号被破坏
 
 **位置**: `src/icewave/data/dataset.py:151-158, 172-173`
 
@@ -140,9 +200,41 @@ if self.is_train:
 `_crop(center=False)` 每次调用自行调 `np.random.randint` 取偏移，因此 **hazy、clear、ice_mask 三者各自裁在不同位置**。只要图像大于 patch_size（192），L1/SSIM/ITL 全部在比较"不同图像区域的像素"。
 
 - 复现输出：`consecutive crops aligned: False`（§6 脚本）
-- **为什么 96 个测试没抓到**：`test_patch_crop_val_centered` 只测了验证集中心裁剪；训练随机裁剪对齐**零覆盖**。
-- **影响**：尚未真实训练过（LIMITATIONS 已声明），所以未实际污染结果——**但 P1-1 联合优化一旦启动训练，此 bug 会让全部损失项失真**。
-- **修复**（10 行内）：先取一次 `(y0, x0)`，三张图共用；同步补测试 `test_train_crop_alignment`（同图裁两遍比较 hazy/clear 位置一致）。
+- **⚠️ A2 提交（`0223bb7`）未修复此 bug，反而引入第四路不对齐**：`dataset.py:243-247` 新增 bbox 加载用**第一次**随机采样 `crop_y/crop_x` 平移坐标，而 hazy 用第二次（`_crop` 内部）、clear 第三次、ice 第四次——四个张量各自对齐到不同的裁剪窗口。BoxFeat/Detectability/BoxAlign 收到的框与检测器实际看到的图像**系统性错位**（偏移差可达 图像-128 像素）。
+- **⚠️ W5 训练全程处于该状态**：`joint_v2_train.yaml` 用 512×512 合成图（`make_synthetic_augmented.py`）配 `patch_size: 128`，随机偏移域宽达 384px。W5 报告的低 PSNR（18.90）与"域迁移问题"结论中，**裁剪错位是未受控的最大混杂变量**。
+- **为什么 146 个测试没抓到**：`test_patch_crop_val_centered` 只测验证集中心裁剪；`test_bbox_loading.py` 测试用了固定 crop_y/crop_x 参数直调 `_load_yolo_labels`，绕过了 `__getitem__` 的随机路径；训练随机裁剪对齐仍**零覆盖**。
+- **修复**（10 行内）：`__getitem__` 先取一次 `(y0, x0)`，对 hazy/clear/ice 用显式窗口切片、bbox 用同一 `(y0, x0)` 平移；同步补测试 `test_train_crop_alignment`。
+
+### P1-5（✅ 已实证）scipy 为未声明依赖，且 import 位于守卫之前 —— 测试套件在干净环境必红
+
+**位置**: `src/icewave/eval/downstream.py:334`（新增于 `0223bb7`）
+
+`paired_t_test()` 第一行就 `from scipy import stats`，之后才做 `n < 2` 早退。`scipy` 未出现在 `pyproject.toml`/`requirements.txt`/`environment.yml` 任何依赖声明中。本地干净 venv 实测：
+
+```
+FAILED tests/test_downstream_gain.py::TestPairedTTest::test_too_few_samples
+ModuleNotFoundError: No module named 'scipy'
+```
+
+CI `test-base` job 只装 `pip install -e .` + pytest（无 scipy，timm/torchvision/opencv 均不传递依赖 scipy）→ 最新提交的 CI 应为红。修复：scipy 进 `[project.optional-dependencies]` 或用纯 numpy 实现 t 检验（成对 t 统计量一行可写）；import 移到守卫之后。
+
+### P2-5 `_parse_detect_output` 对真实 YOLOv8 的输出布局解析错误（潜伏 bug）
+
+**位置**: `src/icewave/models/detector_wrapper.py:156-183`
+
+YOLOv8 Detect 头每 anchor 输出 `4×reg_max(=64) DFL 通道 + nc 类别`，**没有独立 objectness 通道**。当前代码假设 `4 + 4×4 = 20` 处有 obj、`box_dim=20` 布局——一旦 `detector_weights` 传入真实 YOLOv8 权重（W5 用 Stub 模式所以没炸），`obj`/`cls` 会从错误的通道切片，三个损失全部失真。另 `grid_h = grid_w = int(sqrt(n_anchors))` 仅在方形输入下碰巧正确。修复：按 ultralytics `Detect.forward` 的真实输出契约重写，或直接调用 `model.model.model[-1]` 的官方解析。
+
+### P2-6 W5 评估脚本重新引入硬编码绝对路径 —— 对 P0-1 重构成果的回归
+
+**位置**: `scripts/run_real_eval.py:8-24`（及 `run_eval_part2.py`/`run_full_eval.py`/`run_downstream_eval.py` 同模式）
+
+```python
+REPO = Path(r"C:\Users\2457025871\.trae-cn\work\turbo-icespoon")
+os.chdir(REPO)                                             # import 期副作用
+yolo_weights = Path(r"D:\dehaze_fusion\yolo_train_output\power_line_yolo\weights\best.pt")
+```
+
+整个 P0-1 重构消灭的 130+ 处硬编码路径（`.trae-cn`、`D:\dehaze_fusion`），在 8 个新 `scripts/run_*.py` 中原样回归，且含 `os.chdir` import 期副作用。这些脚本在作者本机之外**不可运行**。修复：改用 `icewave.utils.paths` + argparse 参数；一次性实验脚本建议移入 `scripts/experiments/` 并在 README 标注"作者本机专用"或直接参数化。附带卫生项：`reports/_shared/fonts/*.ttf`（二进制字体）与 `echarts.min.js` 入库 ~230KB，可接受但应在 .gitattributes 标 binary；`make_synthetic_data.py` 与 `make_synthetic_augmented.py` 双实现。
 
 ### P1-1（✅ 已复现）`synthesize_hazy_iced` 元数据 A 与实际合成 A 不一致
 
@@ -216,23 +308,46 @@ def __init__(self, weights, device="cpu", class_name="target", min_area=200, iou
 
 ## 5. 改进建议与最佳实践
 
+### 5.0 ⚠️ 最紧急：W5 实验结论必须作废重跑
+
+P0-1（四路裁剪错位）+ P0-2（检测损失梯度死路）+ P1-5（scipy）三个 bug 都在 W5 训练/消融路径上。当前 `reports/w5-experiment-report.html` 的全部数字（含"检测感知损失损害泛化"核心发现）**不具备论文证据效力**。正确顺序：
+
+1. 修 P0-1 → 修 P0-2 → 补两类梯度/对齐回归测试 → 修 P1-5 让 CI 回绿；
+2. 重跑 smoke test（1+1 epoch，确认 `pred.grad` 非零、loss 曲线合理）；
+3. 重跑 W5 四组消融（预算不变，~110 GPU-h 内）；
+4. 重写 W5 报告；论文 §3.2/§4.3 数字以重跑为准。
+
 ### 5.1 优先级排序（投稿路线图视角）
 
 | 优先级 | 动作 | 工作量 | 阻塞的下游 |
 |--------|------|--------|-----------|
-| **立即** | 修 P0-1 裁剪对齐 + 补对齐测试 | 0.5 天 | 一切真实训练（A1/A2、P0-3 基线） |
-| **立即** | 修 P1-1 元数据 A | 0.5 天 | L_ice-phys 物理监督 |
-| **本周** | 修 P1-2 maskrcnn TypeError、P1-3 zip 输入（或删宣称） | 各 0.5 天 | 评测 CLI 可用性 |
+| **立即** | 修 P0-1 裁剪对齐（含 bbox 同窗）+ 补对齐测试 | 0.5 天 | 一切真实训练（W5 重跑、P0-3 基线） |
+| **立即** | 修 P0-2 梯度死路（去 no_grad/detach）+ 补 `pred.grad>0` 测试 | 0.5 天 | joint_v2 框架的立论基础 |
+| **立即** | 修 P1-5 scipy 依赖声明 + import 移到守卫后 | 0.5 小时 | CI 回绿、测试套件可信 |
+| **本周** | 修 P1-1 元数据 A；P1-2 maskrcnn TypeError；P1-3 zip 输入（或删宣称） | 各 0.5 天 | 物理监督 / 评测 CLI 可用性 |
 | **本周** | P1-4 统一推理协议 + 结果 JSON 记录协议字段 | 1 天 | 基准数字可信性 |
+| **重训前** | P2-5 重写 YOLOv8 输出解析（真实权重路径） | 1 天 | 真实检测器接入 joint_v2 |
 | **启动训练前** | P2-3 weights_only + SHA256 校验 | 1 天 | 权重发布安全 |
-| **顺手** | P2/P3 其余项 | 合计 1 天 | — |
+| **顺手** | P2-6 脚本参数化 / P2-1 / P2-2 / P2-4 / P3 | 合计 1.5 天 | 仓库卫生 |
 
 ### 5.2 测试缺口（按风险补）
 
-1. **训练随机裁剪 hazy/clear/ice 三图同位**（P0-1 的直接回归测试）——最高优先。
-2. maskrcnn 分支 CLI 冒烟（P1-2 这类"签名漂移"靠 `--help` 冒烟测不出）。
-3. `synthesize_hazy_iced(with_metadata=True)` 物理一致性：用 `t_map + A + clear` 重建 == hazy（正是 §6 脚本的断言，可直接转正为测试）。
-4. benchmark `--models *.pth` 非 m4 checkpoint 的报错路径。
+1. **训练随机裁剪 hazy/clear/ice/bbox 四路同窗**（P0-1 的直接回归测试）——最高优先。
+2. **检测损失对去雾输入的梯度非零断言**（P0-2 的直接回归测试）——`loss.backward(); assert pred.grad is not None and pred.grad.norm() > 0`。当前 17 个 detect loss 测试全部只断言损失数值，无一个断言梯度可达，这正是 P0-2 溜过去的原因。
+3. **scipy 缺失环境的 t 检验早退路径**（P1-5）。
+4. maskrcnn 分支 CLI 冒烟（P1-2 这类"签名漂移"靠 `--help` 冒烟测不出）。
+5. `synthesize_hazy_iced(with_metadata=True)` 物理一致性：用 `t_map + A + clear` 重建 == hazy（正是 §6 脚本的断言，可直接转正为测试）。
+6. benchmark `--models *.pth` 非 m4 checkpoint 的报错路径。
+
+### 5.2.1 新增代码的正面评价（A2/W2–W6 提交）
+
+为公平起见，A2 提交也有多处高质量实现：
+
+- `UncertaintyWeighting` 升级支持 `s_init/s_clamp`（σ 漂移约束）——正是 JOINT_OPTIMIZATION_FRAMEWORK §8.5 预案的正确落地；
+- `test_bbox_loading.py` 对 padding/越界框/空标签覆盖到位（只是没接进 `__getitem__` 随机路径）;
+- `compute_gain_stats`（Δ/R + 95% CI）、`per_haze_level_report`、`paired_t_test` 三件套补齐了评测协议；
+- W5 报告如实记录负面结果（"检测感知损失损害泛化"）而非隐藏——科研诚信态度正确，只是结论恰好被 bug 混杂；
+- smoke test 脚本（1+1 epoch）先验证训练流程再上正式训练的流程意识很好。
 
 ### 5.3 结构性建议
 
@@ -265,6 +380,24 @@ hazy = _crop(img, 192, center=False)
 clear = _crop(img, 192, center=False)
 assert not np.array_equal(hazy, clear)   # ← __getitem__ 内 hazy/clear 即此关系
 
+# --- P0-2: 检测感知三损失对 pred 的梯度为零/无图 ---
+import torch
+from icewave.models.detector_wrapper import DetectorWrapper
+from icewave.losses.detect import (BoxFeaturePreservationLoss,
+                                   DetectabilityLoss, BoxAlignLoss)
+det = DetectorWrapper(weights=None, freeze_backbone=True)   # 同 W5 Stub 配置
+pred = torch.rand(2, 3, 128, 128, requires_grad=True)
+clear_t = torch.rand(2, 3, 128, 128)
+boxes = torch.tensor([[0.2, 0.2, 0.8, 0.8]])
+
+L2 = BoxFeaturePreservationLoss(feature_type="detector")(pred, clear_t, boxes, detector=det)
+L2.backward()
+assert pred.grad.norm().item() == 0.0    # ← 梯度恰为零
+
+det_out = det(pred2 := torch.rand(2, 3, 128, 128, requires_grad=True))
+DetectabilityLoss()(det_out, torch.tensor([[0, 1], [2, 3]])).backward()
+assert pred2.grad is None                # ← 无计算图
+
 # --- P1-1: 元数据 A 与实际 A 不一致 ---
 from icewave.data.degradation import HazeParams, synthesize_hazy_iced
 clear = np.full((64, 64, 3), 128, dtype=np.uint8)
@@ -274,6 +407,10 @@ t = meta["t_map"][:, :, None]
 recon = np.clip(clear.astype(np.float32) * t
                 + np.array(meta["A"])[None, None, :] * (1 - t), 0, 255).astype(np.uint8)
 assert not np.array_equal(recon, h2)     # 若 A 一致应逐字节相等
+
+# --- P1-5: 干净环境 (无 scipy) ---
+# python -m pytest tests/test_downstream_gain.py::TestPairedTTest -q
+# → ModuleNotFoundError: No module named 'scipy' (n<2 早退路径也应失败)
 ```
 
-> 本报告全部文件行号基于 commit `99f59ad`。修复后请以本报告 §5.1 清单逐项回勾。
+> 本报告全部文件行号基于 commit `11e52df`。修复后请以本报告 §5.0–§5.1 清单逐项回勾。
