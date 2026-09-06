@@ -315,6 +315,7 @@ _MODEL_SPECS = {
     "m3": (True, 2, 32),
     "m4": (True, 2, 32),
     "joint": (True, 2, 32),
+    "joint_v2": (True, 2, 32),  # 同 joint 架构, 训练策略不同 (双阶段+检测感知)
 }
 
 

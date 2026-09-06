@@ -216,6 +216,142 @@ def downstream_gain(detector: DetectorProto, hazy_dir: Path, dehazed_dir: Path,
 
 
 # ---------------------------------------------------------------------------
+# §6 增益统计 (Δ_gain, Δ_gap, R + 95% CI)
+# ---------------------------------------------------------------------------
+def compute_gain_stats(result: dict, n_bootstrap: int = 1000,
+                       seed: int = 42) -> dict:
+    """从 downstream_gain 结果计算增益统计量.
+
+    计算内容:
+        - Δ_gain = mAP_dehazed - mAP_hazy
+        - Δ_gap = mAP_clear - mAP_dehazed  (需 clear 字段)
+        - R = Δ_gain / (mAP_clear - mAP_hazy)  (归一化恢复率)
+        - 95% bootstrap CI (基于 per-image AP 重采样)
+
+    Args:
+        result: downstream_gain() 返回的 dict
+        n_bootstrap: bootstrap 采样次数
+        seed: 随机种子
+
+    Returns:
+        dict 含 delta_gain, delta_gap, R, ci_low, ci_high
+    """
+    rng = np.random.default_rng(seed)
+    mAP_hazy = result["hazy"]["mAP"]
+    mAP_dehazed = result["dehazed"]["mAP"]
+    delta_gain = mAP_dehazed - mAP_hazy
+
+    stats = {
+        "delta_gain": delta_gain,
+        "mAP_hazy": mAP_hazy,
+        "mAP_dehazed": mAP_dehazed,
+    }
+
+    if "clear" in result:
+        mAP_clear = result["clear"]["mAP"]
+        delta_gap = mAP_clear - mAP_dehazed
+        denom = mAP_clear - mAP_hazy
+        R = delta_gain / denom if abs(denom) > 1e-8 else float("inf")
+        stats["delta_gap"] = delta_gap
+        stats["R"] = R
+        stats["mAP_clear"] = mAP_clear
+    else:
+        stats["delta_gap"] = None
+        stats["R"] = None
+
+    # Bootstrap CI (基于 per-image AP)
+    per_img_hazy = result["hazy"].get("per_image", [])
+    per_img_dehazed = result["dehazed"].get("per_image", [])
+    if per_img_hazy and per_img_dehazed and len(per_img_hazy) == len(per_img_dehazed):
+        gains = np.array([d - h for d, h in
+                         zip(per_img_dehazed, per_img_hazy)])
+        boot_means = []
+        n = len(gains)
+        for _ in range(n_bootstrap):
+            idx = rng.integers(0, n, size=n)
+            boot_means.append(gains[idx].mean())
+        ci_low = float(np.percentile(boot_means, 2.5))
+        ci_high = float(np.percentile(boot_means, 97.5))
+        stats["delta_gain_ci_low"] = ci_low
+        stats["delta_gain_ci_high"] = ci_high
+    else:
+        stats["delta_gain_ci_low"] = None
+        stats["delta_gain_ci_high"] = None
+
+    return stats
+
+
+def per_haze_level_report(per_image_results: list[dict],
+                          haze_levels: list[str]) -> dict:
+    """按雾档分组报告 mAP 增益.
+
+    Args:
+        per_image_results: 每张图的 {stem, mAP_hazy, mAP_dehazed, ...}
+        haze_levels: 与 per_image_results 等长的雾档标签
+                     (如 "thin"/"medium"/"dense")
+
+    Returns:
+        {level: {n_images, mAP_hazy, mAP_dehazed, delta_gain, R}}
+    """
+    from collections import defaultdict
+    groups = defaultdict(list)
+    for r, level in zip(per_image_results, haze_levels):
+        groups[level].append(r)
+
+    report = {}
+    for level, items in sorted(groups.items()):
+        hazy_vals = [r.get("mAP_hazy", 0) for r in items]
+        dehazed_vals = [r.get("mAP_dehazed", 0) for r in items]
+        clear_vals = [r.get("mAP_clear", 0) for r in items]
+        mh = np.mean(hazy_vals) if hazy_vals else 0.0
+        md = np.mean(dehazed_vals) if dehazed_vals else 0.0
+        mc = np.mean(clear_vals) if clear_vals else 0.0
+        dg = md - mh
+        denom = mc - mh
+        R = dg / denom if abs(denom) > 1e-8 else float("inf")
+        report[level] = {
+            "n_images": len(items),
+            "mAP_hazy": float(mh),
+            "mAP_dehazed": float(md),
+            "mAP_clear": float(mc) if clear_vals else None,
+            "delta_gain": float(dg),
+            "R": float(R) if mc > 0 else None,
+        }
+    return report
+
+
+def paired_t_test(method_a: list[float],
+                  method_b: list[float]) -> dict:
+    """成对 t 检验: 检验两种方法 mAP 差异是否显著.
+
+    Args:
+        method_a: 方法 A 的 per-image mAP 列表
+        method_b: 方法 B 的 per-image mAP 列表
+
+    Returns:
+        {t_stat, p_value, mean_diff, n, significant}
+    """
+    from scipy import stats as sp_stats
+    a = np.array(method_a, dtype=np.float64)
+    b = np.array(method_b, dtype=np.float64)
+    n = min(len(a), len(b))
+    if n < 2:
+        return {"t_stat": 0.0, "p_value": 1.0, "mean_diff": 0.0,
+                "n": n, "significant": False}
+    diff = a[:n] - b[:n]
+    t_stat, p_value = sp_stats.ttest_rel(a[:n], b[:n])
+    if np.isnan(p_value):
+        p_value = 1.0
+    return {
+        "t_stat": float(t_stat) if not np.isnan(t_stat) else 0.0,
+        "p_value": float(p_value),
+        "mean_diff": float(diff.mean()),
+        "n": n,
+        "significant": bool(p_value < 0.05),
+    }
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 def main(argv=None):
@@ -287,6 +423,13 @@ def main(argv=None):
     if "clear" in result:
         print(f"  clear={result['clear']['mAP']:.4f}  "
               f"gap={result['gap_clear_minus_dehazed']:+.4f}")
+
+    # §6 增益统计
+    gain_stats = compute_gain_stats(result)
+    result["gain_stats"] = gain_stats
+    if gain_stats.get("R") is not None:
+        print(f"  Δ_gain={gain_stats['delta_gain']:+.4f}  "
+              f"R={gain_stats['R']:.1%}")
     print(f"  → {out_path}")
 
 

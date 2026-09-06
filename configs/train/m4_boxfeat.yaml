@@ -1,0 +1,39 @@
+# M4 + BoxFeaturePreservationLoss (A1 D12-D14)
+# 在 M4 (ITL 覆冰感知) 基础上加入框内特征保持损失 (Stub 版)
+# 用于验证 BoxFeat 损失不破坏重建质量
+#
+# 使用: icewave-train --config configs/train/m4_boxfeat.yaml
+
+seed: 42
+deterministic: false
+
+model:
+  version: m4
+  backbone: s
+  init_checkpoint: ${ICEWAVE_WEIGHTS_DIR}/checkpoints/m4_best.pth
+
+data:
+  root: ${ICEWAVE_DATA_ROOT}/dataset
+  patch_size: 192
+  with_bboxes: true       # 数据集读取 YOLO 标签
+
+train:
+  epochs: 8                # warm-up 验证, 不需长训
+  batch_size: 4
+  lr: 1.0e-4
+  weight_decay: 1.0e-4
+  num_workers: 0
+  grad_clip: 10.0
+  prompt_drop_prob: 0.5
+  train_prompt_proj: true
+
+losses:
+  lambda_l1: 1.0
+  lambda_ssim: 0.1
+  lambda_kd: 0.05
+  lambda_itl: 0.5
+  lambda_box_feat: 0.5     # BoxFeat 权重 (§3.2)
+  itl_lambda_region: 0.5
+  itl_lambda_boundary: 0.3
+  itl_region_term: ssim
+  box_feat_type: stub      # stub (D11) | detector (W2)

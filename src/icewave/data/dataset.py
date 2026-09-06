@@ -87,13 +87,83 @@ def _dilate(mask: np.ndarray, k: int = 7) -> np.ndarray:
     return cv2.dilate(mask, kernel, iterations=1)
 
 
+def _load_yolo_labels(txt_path: Path, img_w: int, img_h: int,
+                      patch_size: int = 0, is_train: bool = True,
+                      crop_y: int = 0, crop_x: int = 0
+                      ) -> tuple[torch.Tensor, torch.Tensor]:
+    """读取 YOLO txt 标签 → (bbox, cls) 张量.
+
+    Args:
+        txt_path: 标签文件路径
+        img_w, img_h: 原始图像宽高
+        patch_size: 裁剪块大小 (0=不裁剪)
+        is_train: 训练模式 (影响裁剪位置)
+        crop_y, crop_x: 裁剪起始坐标
+
+    Returns:
+        bbox: (N, 4) 归一化 xyxy 坐标 (相对于裁剪后图像)
+        cls: (N,) 类别 ID
+    """
+    if not txt_path.exists():
+        return torch.zeros(0, 4), torch.zeros(0, dtype=torch.long)
+
+    bboxes = []
+    classes = []
+    for line in txt_path.read_text(encoding="utf-8").splitlines():
+        parts = line.split()
+        if len(parts) < 5:
+            continue
+        try:
+            cls_id = int(parts[0])
+            xc, yc, bw, bh = (float(v) for v in parts[1:5])
+        except ValueError:
+            continue
+        # 转绝对像素坐标
+        x1 = (xc - bw / 2) * img_w
+        y1 = (yc - bh / 2) * img_h
+        x2 = (xc + bw / 2) * img_w
+        y2 = (yc + bh / 2) * img_h
+
+        if patch_size > 0:
+            # 调整到裁剪坐标系
+            x1 -= crop_x
+            y1 -= crop_y
+            x2 -= crop_x
+            y2 -= crop_y
+            # 裁剪到 patch 范围
+            x1 = max(0.0, x1)
+            y1 = max(0.0, y1)
+            x2 = min(float(patch_size), x2)
+            y2 = min(float(patch_size), y2)
+            # 丢弃完全在 patch 外的框
+            if x2 <= 0 or y2 <= 0 or x1 >= patch_size or y1 >= patch_size:
+                continue
+
+        # 归一化到裁剪后图像尺寸
+        norm_w = float(patch_size) if patch_size > 0 else float(img_w)
+        norm_h = float(patch_size) if patch_size > 0 else float(img_h)
+        bboxes.append([x1 / norm_w, y1 / norm_h,
+                       x2 / norm_w, y2 / norm_h])
+        classes.append(cls_id)
+
+    if not bboxes:
+        return torch.zeros(0, 4), torch.zeros(0, dtype=torch.long)
+    return (torch.tensor(bboxes, dtype=torch.float32),
+            torch.tensor(classes, dtype=torch.long))
+
+
 class IceAwareDataset(Dataset):
-    """去雾 + 覆冰感知训练数据集."""
+    """去雾 + 覆冰感知训练数据集.
+
+    升级 (JOINT_OPTIMIZATION_FRAMEWORK §5.2): ``return_bboxes=True`` 时
+    额外输出 ``(bbox, cls)``, 供 joint_v2 训练使用检测感知损失。
+    """
 
     def __init__(self, root, split: str = "train",
                  patch_size: int = 192, is_train: bool = True,
                  return_ice: bool = True, corridor_from_ice: bool = False,
-                 corridor_kernel: int = 7):
+                 corridor_kernel: int = 7,
+                 return_bboxes: bool = False):
         self.root = Path(root)
         self.split = split
         self.patch_size = int(patch_size)
@@ -101,12 +171,14 @@ class IceAwareDataset(Dataset):
         self.return_ice = return_ice
         self.corridor_from_ice = corridor_from_ice
         self.corridor_kernel = corridor_kernel
+        self.return_bboxes = return_bboxes
 
         base = self.root / split
         self.clear_dir = base / "clear"
         self.hazy_dir = base / "hazy"
         self.ice_dir = base / "ice_mask"
         self.human_dir = base / "ice_mask_human"
+        self.labels_dir = base / "labels"
         for d in (self.clear_dir, self.hazy_dir):
             if not d.exists():
                 raise FileNotFoundError(f"数据集目录缺失: {d}")
@@ -116,12 +188,12 @@ class IceAwareDataset(Dataset):
         self.samples = []  # list of (hazy_path, clear_path, ice_path or None, human_path or None)
         self._human_masks = False
         for hp in sorted(self.hazy_dir.glob("*.*")):
-            base = _pair_base(hp.name)
-            cp = self.clear_dir / f"{base}.png"
+            base_name = _pair_base(hp.name)
+            cp = self.clear_dir / f"{base_name}.png"
             if not cp.exists():
                 continue
-            ice_p = self.ice_dir / f"{base}_ice.png"
-            human_p = self.human_dir / f"{base}_ice.png"
+            ice_p = self.ice_dir / f"{base_name}_ice.png"
+            human_p = self.human_dir / f"{base_name}_ice.png"
             ice = ice_p if ice_p.exists() else None
             human = human_p if human_p.exists() else None
             if human is not None:
@@ -147,10 +219,11 @@ class IceAwareDataset(Dataset):
         clear = cv2.cvtColor(clear, cv2.COLOR_BGR2RGB)
 
         ps = self.patch_size
+        crop_y, crop_x = 0, 0
         if ps > 0:
             if self.is_train:
-                seed_y = np.random.randint(0, max(1, hazy.shape[0] - ps + 1))
-                seed_x = np.random.randint(0, max(1, hazy.shape[1] - ps + 1))
+                crop_y = int(np.random.randint(0, max(1, hazy.shape[0] - ps + 1)))
+                crop_x = int(np.random.randint(0, max(1, hazy.shape[1] - ps + 1)))
                 hazy = _crop(hazy, ps, center=False)
                 clear = _crop(clear, ps, center=False)
             else:
@@ -160,7 +233,7 @@ class IceAwareDataset(Dataset):
         hazy_t = torch.from_numpy(hazy.transpose(2, 0, 1)).float() / 255.0
         clear_t = torch.from_numpy(clear.transpose(2, 0, 1)).float() / 255.0
 
-        if not self.return_ice:
+        if not self.return_ice and not self.return_bboxes:
             return hazy_t, clear_t
 
         # ice: 优先人工标注 (P0-4)
@@ -175,6 +248,20 @@ class IceAwareDataset(Dataset):
                 ice = torch.zeros(1, hazy_t.shape[1], hazy_t.shape[2])
             else:
                 ice = torch.from_numpy(ice_arr).float().unsqueeze(0)
+
+        if self.return_bboxes:
+            # YOLO 标签 (§5.2): bbox 归一化 xyxy + cls
+            base_name = _pair_base(hp.name)
+            label_path = self.labels_dir / f"{base_name}.txt"
+            bbox, cls = _load_yolo_labels(label_path, clear.shape[1],
+                                          clear.shape[0], ps,
+                                          self.is_train, crop_y, crop_x)
+            if self.corridor_from_ice:
+                ice_np = (ice.squeeze(0).numpy() > 0.5).astype(np.uint8)
+                corridor_np = _dilate(ice_np, self.corridor_kernel)
+                corridor = torch.from_numpy(corridor_np).float().unsqueeze(0)
+                return hazy_t, clear_t, ice, corridor, bbox, cls
+            return hazy_t, clear_t, ice, bbox, cls
 
         if not self.corridor_from_ice:
             return hazy_t, clear_t, ice

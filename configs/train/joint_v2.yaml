@@ -1,0 +1,51 @@
+# Joint v2: 检测感知联合优化 (JOINT_OPTIMIZATION_FRAMEWORK §5.3)
+# 双阶段训练: Stage-A (warm-up) → Stage-B (joint)
+#
+# 使用: icewave-train --config configs/train/joint_v2.yaml
+
+seed: 42
+deterministic: false
+
+model:
+  version: joint_v2          # 新 version, 不影响旧 joint
+  backbone: s
+  init_checkpoint: ${ICEWAVE_WEIGHTS_DIR}/checkpoints/m4_best.pth
+
+data:
+  root: ${ICEWAVE_DATA_ROOT}/dataset
+  patch_size: 192
+  with_bboxes: true          # 数据集须读 bbox txt
+
+train:
+  stages:
+    warm_up:
+      epochs: 8
+      lr: 1.0e-4
+      freeze_detector: true
+    joint:
+      epochs: 40
+      lr: 5.0e-5
+      freeze_detector_backbone: true   # 只冻结 backbone
+      grad_clip: 10.0
+  batch_size: 4
+  weight_decay: 1.0e-4
+  num_workers: 0
+  prompt_drop_prob: 0.5
+  train_prompt_proj: true
+
+losses:
+  K: 5                       # 不确定性加权损失项数
+  lambda_recon_l1: 1.0
+  lambda_recon_ssim: 0.1
+  lambda_box_feat: 0.5       # §3.2 框内特征保持
+  lambda_detect: 0.2         # §3.3 可检测性
+  lambda_box_align: 0.5      # §3.4 框对齐 (CIoU + DFL)
+  lambda_ice_phys: 0.3       # §3.6 物理一致性
+  lambda_kd: 0.05
+  lambda_itl: 0.5
+  itl_lambda_region: 0.5
+  itl_lambda_boundary: 0.3
+  itl_region_term: ssim
+  box_feat_type: detector    # W2 起用检测器特征
+  s_init: 0.0                # log σ² 起点
+  s_clamp: [-6.0, 6.0]        # §4.3 σ 漂移约束

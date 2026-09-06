@@ -46,6 +46,12 @@ class IceParams:
     """覆冰复合参数.
 
     物理: ``alpha = 1 - exp(-extinction * thickness)``, alpha 越大冰层越不透明.
+
+    升级字段 (JOINT_OPTIMIZATION_FRAMEWORK §2.3):
+    - specular_strength: 镜面反射比例 (R_spec * I_env)
+    - translucent_strength: 半透明散射比例 (R_trans * J_trans)
+    - blur_sigma_x / blur_sigma_y: 各向异性模糊 σ (沿导线方向拉长)
+    - morphology: 冰晶形态, 影响 S 的采样方式
     """
 
     enabled: bool = False
@@ -53,6 +59,12 @@ class IceParams:
     coverage: float = 0.5         # 冰覆盖比例 (0~1)
     max_thickness: float = 1.0    # 归一化厚度上限
     texture_strength: float = 0.15  # 冰面纹理对像素的扰动幅度
+    # —— 升级字段 (§2.3) ——
+    specular_strength: float = 0.4    # 镜面反射比例
+    translucent_strength: float = 0.3  # 半透明散射比例
+    blur_sigma_x: float = 1.0        # 各向异性模糊 σ_x
+    blur_sigma_y: float = 2.5        # σ_y (沿导线方向拉长)
+    morphology: str = "shell"       # shell / sleeve / lobe / cluster
 
 
 HAZE_PRESETS = {
@@ -117,6 +129,49 @@ def make_ice_texture(h: int, w: int, rng: np.random.Generator) -> np.ndarray:
     return smoothed
 
 
+def make_specular_reflection(h: int, w: int, rng: np.random.Generator,
+                             morphology: str = "shell") -> np.ndarray:
+    """生成冰面镜面反射图 S (h, w, 3) ∈ [0, 1].
+
+    物理分解 (§2.2): S = R_spec * I_env + R_trans * J_trans
+    - R_spec: 强方向性镜面反射, 受冰晶形态影响
+    - morphology="shell": 薄壳状, 高频斑点
+    - morphology="sleeve": 管状包裹, 沿水平方向拉长
+    - morphology="lobe": 瘤状, 低频团块
+    - morphology="cluster": 聚簇, 不规则斑块
+    """
+    if morphology == "lobe":
+        base = rng.normal(0.3, 0.1, (h, w)).astype(np.float32)
+    elif morphology == "sleeve":
+        base = rng.normal(0.4, 0.08, (h, w)).astype(np.float32)
+    elif morphology == "cluster":
+        base = rng.normal(0.35, 0.15, (h, w)).astype(np.float32)
+    else:  # shell (default)
+        base = rng.normal(0.5, 0.12, (h, w)).astype(np.float32)
+
+    base = np.clip(base, 0.0, 1.0)
+    # 三通道色温微扰 (冰面偏冷色调: B > G > R)
+    r = base * rng.uniform(0.85, 0.95)
+    g = base * rng.uniform(0.90, 1.00)
+    b = base * rng.uniform(0.95, 1.05)
+    return np.stack([r, g, b], axis=-1).astype(np.float32)
+
+
+def make_anisotropic_blur_kernel(sigma_x: float, sigma_y: float,
+                                  ksize: int = 5) -> np.ndarray:
+    """生成各向异性高斯模糊核 (ksize, ksize).
+
+    σ_y > σ_x → 沿水平方向 (导线方向) 扩散更强, 模拟冰层在轮廓处的扩散性模糊。
+    """
+    pad = ksize // 2
+    ax = np.arange(-pad, pad + 1, dtype=np.float32)
+    xx, yy = np.meshgrid(ax, ax, indexing="xy")
+    kernel = np.exp(-(xx ** 2) / (2 * sigma_x ** 2)
+                    - (yy ** 2) / (2 * sigma_y ** 2))
+    kernel = kernel / kernel.sum()
+    return kernel
+
+
 # ---------------------------------------------------------------------------
 # 经典 ASM (无冰), 与旧 build_dataset_v3.py 数值行为一致
 # ---------------------------------------------------------------------------
@@ -146,27 +201,52 @@ def synthesize_haze(clear: np.ndarray, t_min: float, t_max: float,
 # 冰层复合 (Beer-Lambert): J_ice = (1 - alpha) * J_clear + alpha * (J_clear + texture)
 # ---------------------------------------------------------------------------
 def ice_composite(clear: np.ndarray, ice: IceParams, rng: np.random.Generator,
-                  thickness: Optional[np.ndarray] = None
+                  thickness: Optional[np.ndarray] = None,
+                  with_speckle: bool = True
                   ) -> tuple:
     """对清晰图施加冰层效果, 返回 ``(out, meta)``.
 
-    ``meta`` 至少含 ``alpha`` (h, w) 掩码, 反映冰层局部不透明度. ``test_zero_thickness_is_identity``
-    验证 ``thickness 全 0 → alpha 全 0 → out == clear``.
+    物理模型 (§2.2):
+        J_ice = (1 - alpha) * J + alpha * S
+    其中 S 包含:
+        - 冰面纹理扰动 (既有)
+        - 镜面反射 R_spec * I_env (升级, with_speckle=True)
+        - 半透明散射 R_trans * J_trans (升级, with_speckle=True)
+
+    ``meta`` 含 ``alpha`` (h, w), ``thickness`` (h, w),
+    以及升级字段 ``S`` (h, w, 3), ``morphology`` (str).
+    ``test_zero_thickness_is_identity`` 验证 thickness=0 → alpha=0 → out=clear.
     """
     h, w = clear.shape[:2]
     if thickness is None:
         thickness = make_ice_thickness(h, w, rng, ice.coverage, ice.max_thickness)
     alpha = (1.0 - np.exp(-ice.extinction * thickness)).astype(np.float32)
+    clear_f = clear.astype(np.float32)
+
     if ice.texture_strength > 0:
         texture = make_ice_texture(h, w, rng)
-        clear_f = clear.astype(np.float32)
         ice_color = np.clip(clear_f + 255.0 * ice.texture_strength * texture[:, :, None],
                             0, 255)
-        out = (1.0 - alpha[:, :, None]) * clear_f + alpha[:, :, None] * ice_color
     else:
-        out = clear.astype(np.float32)
+        ice_color = clear_f.copy()
+
+    S = None
+    if with_speckle:
+        # 镜面反射 S = R_spec * I_env + R_trans * J_trans
+        spec_map = make_specular_reflection(h, w, rng, ice.morphology)
+        env_light = np.array([200, 210, 220], dtype=np.float32)  # 环境光偏冷
+        S = (ice.specular_strength * spec_map * env_light[None, None, :]
+             + ice.translucent_strength * clear_f)  # 半透明散射取清晰图
+        S = np.clip(S, 0, 255)
+        ice_color = np.clip(ice_color * (1 - 0.3) + S * 0.3, 0, 255)
+
+    out = (1.0 - alpha[:, :, None]) * clear_f + alpha[:, :, None] * ice_color
     out = np.clip(out, 0, 255).astype(np.uint8)
-    return out, {"alpha": alpha, "thickness": thickness}
+
+    meta = {"alpha": alpha, "thickness": thickness, "morphology": ice.morphology}
+    if S is not None:
+        meta["S"] = S
+    return out, meta
 
 
 # ---------------------------------------------------------------------------
@@ -175,36 +255,58 @@ def ice_composite(clear: np.ndarray, ice: IceParams, rng: np.random.Generator,
 def synthesize_hazy_iced(clear: np.ndarray, haze: HazeParams,
                          ice: Optional[IceParams] = None,
                          rng: Optional[np.random.Generator] = None,
-                         with_metadata: bool = False):
-    """组合合成: 冰层 (若启用) → 大气散射.
+                         with_metadata: bool = False,
+                         apply_blur: bool = True,
+                         with_speckle: bool = True):
+    """组合合成: 冰层 (若启用) → 边缘模糊 (若启用) → 大气散射.
 
     无冰时与 ``synthesize_haze`` **逐字节相等** (供旧管线兼容). 元数据键:
     ``t_map`` (h, w), ``A`` (长度 3 RGB), ``ice_alpha`` (h, w),
-    ``ice_thickness`` (h, w). 仅雾时返回 ``t_map`` + ``A`` 无 ice_* 键.
+    ``ice_thickness`` (h, w), 以及升级字段 ``S`` (h, w, 3),
+    ``blur_kernel_id`` (str), ``morphology`` (str).
+    仅雾时返回 ``t_map`` + ``A`` 无 ice_* 键.
+
+    升级 (§2.3):
+    - ``apply_blur=True``: 冰层边缘各向异性高斯模糊 (K)
+    - ``with_speckle=True``: 镜面反射 + 半透明散射 (S)
     """
     if rng is None:
         rng = np.random.default_rng(0)
 
     # Step 1: 冰层复合 (可选, 无冰即恒等)
     if ice is None or not ice.enabled:
-        pre_haze = clear
+        pre_blur = clear
         ice_meta = {}
     else:
-        pre_haze, ice_meta = ice_composite(clear, ice, rng)
-        # ice_composite 返回 {"alpha", "thickness"}; 暴露给外部时加 ice_ 前缀
-        # 以与 HAZE 域键 (t_map / A) 明确区分, 避免下游误读。
-        ice_meta = {"ice_alpha": ice_meta["alpha"],
-                    "ice_thickness": ice_meta["thickness"]}
+        pre_blur, full_meta = ice_composite(clear, ice, rng,
+                                            with_speckle=with_speckle)
+        ice_meta = {"ice_alpha": full_meta["alpha"],
+                    "ice_thickness": full_meta["thickness"]}
+        if "S" in full_meta:
+            ice_meta["S"] = full_meta["S"]
+        if "morphology" in full_meta:
+            ice_meta["morphology"] = full_meta["morphology"]
 
-    # Step 2: 大气散射
+    # Step 2: 各向异性边缘模糊 (冰诱导 + 离焦)
+    blur_kernel_id = "none"
+    if apply_blur and ice is not None and ice.enabled:
+        kernel = make_anisotropic_blur_kernel(
+            ice.blur_sigma_x, ice.blur_sigma_y, ksize=5)
+        alpha_3 = ice_meta["ice_alpha"][:, :, None]
+        blurred = _apply_kernel(pre_blur.astype(np.float32), kernel)
+        pre_haze = ((1 - alpha_3) * pre_blur.astype(np.float32)
+                    + alpha_3 * blurred).clip(0, 255).astype(np.uint8)
+        blur_kernel_id = f"sigma({ice.blur_sigma_x},{ice.blur_sigma_y})"
+    else:
+        pre_haze = pre_blur
+
+    # Step 3: 大气散射
     hazy, [t_map] = synthesize_haze(pre_haze, haze.t_min, haze.t_max,
                                     haze.airlight, rng)
-    # synthesize_haze 返回的 t_map 是 [t_map] 列表以兼容旧多输出
 
     if not with_metadata:
         return hazy
 
-    # 大气光 (RGB) —— 与 synthesize_haze 中相同规则, 但此处用 rng 一致序列
     A = np.array([
         int(haze.airlight * rng.uniform(0.95, 1.05)),
         int(haze.airlight * rng.uniform(0.95, 1.05)),
@@ -212,4 +314,17 @@ def synthesize_hazy_iced(clear: np.ndarray, haze: HazeParams,
     ], dtype=np.float32).tolist()
     meta = {"t_map": t_map, "A": A}
     meta.update(ice_meta)
+    meta["blur_kernel_id"] = blur_kernel_id
     return hazy, meta
+
+
+def _apply_kernel(img: np.ndarray, kernel: np.ndarray) -> np.ndarray:
+    """对 (h, w, 3) 图像施加 2D 卷积 (反射边界). 纯 NumPy, 无 scipy 依赖."""
+    k = kernel.shape[0]
+    pad = k // 2
+    padded = np.pad(img, ((pad, pad), (pad, pad), (0, 0)), mode="reflect")
+    out = np.zeros_like(img)
+    for i in range(k):
+        for j in range(k):
+            out += padded[i:i + img.shape[0], j:j + img.shape[1]] * kernel[i, j]
+    return out

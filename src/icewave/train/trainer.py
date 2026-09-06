@@ -27,9 +27,17 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader
 
 from icewave.data.dataset import IceAwareDataset
-from icewave.losses.detect import CorridorTextureLoss, UncertaintyWeighting
+from icewave.losses.detect import (
+    BoxAlignLoss,
+    BoxFeaturePreservationLoss,
+    CorridorTextureLoss,
+    DetectabilityLoss,
+    IcePhysicalLoss,
+    UncertaintyWeighting,
+)
 from icewave.losses.itl import ITLLoss
 from icewave.models import build_model
+from icewave.models.detector_wrapper import DetectorWrapper
 from icewave.models.prompt import CLIPFogPrompt, HazeCLIPTeacher
 from icewave.train.config import git_commit
 from icewave.utils.paths import OUTPUT_DIR
@@ -64,10 +72,12 @@ class Trainer:
 
     def _build_datasets(self):
         dcfg = self.cfg["data"]
+        is_joint_v2 = self.version == "joint_v2"
         common = dict(
             patch_size=dcfg.get("patch_size", 192),
-            return_ice=self.version in ("m4", "joint"),
-            corridor_from_ice=self.version == "joint",
+            return_ice=self.version in ("m4", "joint", "joint_v2"),
+            corridor_from_ice=self.version in ("joint", "joint_v2"),
+            return_bboxes=is_joint_v2 or dcfg.get("with_bboxes", False),
         )
         train_ds = IceAwareDataset(dcfg["root"], "train",
                                    is_train=True, **common)
@@ -84,6 +94,8 @@ class Trainer:
 
     # ------------------------------------------------------------------
     def train(self):
+        if self.version == "joint_v2":
+            return self.train_joint_v2()
         cfg = self.cfg
         tcfg = cfg.get("train", {})
         epochs = tcfg.get("epochs", 30)
@@ -296,6 +308,288 @@ class Trainer:
             ssims.append(_ssim(pred, clear).item())
         model.train()
         return float(np.mean(psnrs)), float(np.mean(ssims))
+
+    # ------------------------------------------------------------------
+    def train_joint_v2(self):
+        """Joint v2 双阶段训练 (§5.1): Stage-A warm-up + Stage-B joint."""
+        cfg = self.cfg
+        tcfg = cfg.get("train", {})
+        lcfg = cfg.get("losses", {})
+        stages = tcfg.get("stages", {})
+        warm_cfg = stages.get("warm_up", {"epochs": 8, "lr": 1e-4})
+        joint_cfg = stages.get("joint", {"epochs": 40, "lr": 5e-5})
+        batch_size = tcfg.get("batch_size", 4)
+        num_workers = tcfg.get("num_workers", 0)
+        grad_clip = joint_cfg.get("grad_clip", 10.0)
+
+        print(f"=== IceWave 训练 [joint_v2] device={self.device} ===")
+
+        # --- 模型 ---
+        model = build_model("joint_v2",
+                            backbone=cfg["model"].get("backbone", "s")).to(self.device)
+        init_from = cfg["model"].get("init_checkpoint")
+        if init_from:
+            ckpt = torch.load(init_from, map_location=self.device,
+                              weights_only=False)
+            model.load_state_dict(ckpt.get("model", ckpt), strict=False)
+            print(f"  从检查点初始化: {init_from}")
+
+        # --- CLIP 提示 ---
+        prompt_extractor = CLIPFogPrompt(
+            prompt_channels=32, device=self.device).to(self.device)
+        prompt_extractor.clip.eval()
+        prompt_drop = tcfg.get("prompt_drop_prob", 0.5)
+        teacher = HazeCLIPTeacher(device=self.device)
+
+        # --- 检测器 (Stub 模式, GPU 环境加载真实 YOLOv8) ---
+        det_weights = cfg["model"].get("detector_weights")
+        detector = DetectorWrapper(
+            weights=det_weights,
+            num_classes=cfg["model"].get("num_classes", 4),
+            freeze_backbone=True,
+        ).to(self.device)
+
+        # --- 损失函数 ---
+        box_feat_loss = BoxFeaturePreservationLoss(
+            feature_type=lcfg.get("box_feat_type", "detector"),
+        ).to(self.device)
+        detect_loss = DetectabilityLoss(
+            tau_cls=lcfg.get("detect_tau_cls", 0.3),
+        ).to(self.device)
+        box_align_loss = BoxAlignLoss(
+            lambda_ciou=lcfg.get("box_align_lambda_ciou", 1.0),
+            lambda_dfl=lcfg.get("box_align_lambda_dfl", 0.25),
+        ).to(self.device)
+        ice_phys_loss = IcePhysicalLoss(
+            lambda_trans=lcfg.get("ice_phys_lambda_trans", 1.0),
+            lambda_ice=lcfg.get("ice_phys_lambda_ice", 1.0),
+        ).to(self.device)
+
+        K = lcfg.get("K", 5)
+        uw = UncertaintyWeighting(
+            num_losses=K,
+            s_init=lcfg.get("s_init", 0.0),
+            s_clamp=tuple(lcfg.get("s_clamp", [-6.0, 6.0])),
+        ).to(self.device)
+
+        # --- 数据 ---
+        train_ds, val_ds = self._build_datasets()
+        train_loader = DataLoader(
+            train_ds, batch_size=batch_size, shuffle=True,
+            num_workers=num_workers, pin_memory=True, drop_last=True,
+            worker_init_fn=worker_init_fn)
+        val_loader = DataLoader(
+            val_ds, batch_size=1, shuffle=False,
+            num_workers=num_workers, pin_memory=True)
+        print(f"  训练集: {train_ds!r}\n  验证集: {val_ds!r}")
+
+        lambda_l1 = lcfg.get("lambda_recon_l1", 1.0)
+        lambda_ssim = lcfg.get("lambda_recon_ssim", 0.1)
+        lambda_box_feat = lcfg.get("lambda_box_feat", 0.5)
+        lambda_detect = lcfg.get("lambda_detect", 0.2)
+        lambda_box_align = lcfg.get("lambda_box_align", 0.5)
+        lambda_ice_phys = lcfg.get("lambda_ice_phys", 0.3)
+
+        best_psnr = -1.0
+        metrics_history = []
+        log_file = open(self.log_dir / "train_log.txt", "w", encoding="utf-8")
+
+        import random as _random
+
+        # ==================== Stage-A: warm-up ====================
+        print(f"  [Stage-A] warm-up {warm_cfg['epochs']} epochs, "
+              f"detector 全冻结")
+        warm_lr = warm_cfg.get("lr", 1e-4)
+        warm_params = list(model.parameters())
+        if prompt_extractor is not None:
+            warm_params += list(prompt_extractor.proj.parameters())
+        warm_optimizer = AdamW(warm_params, lr=warm_lr, weight_decay=1e-4)
+        warm_scheduler = CosineAnnealingLR(
+            warm_optimizer, T_max=warm_cfg["epochs"], eta_min=1e-7)
+
+        amp_dtype = self._autocast_dtype()
+        scaler = torch.amp.GradScaler("cuda", enabled=amp_dtype is torch.float16)
+
+        for epoch in range(warm_cfg["epochs"]):
+            model.train()
+            detector.eval()
+            t0 = time.time()
+            ep = {"loss": 0.0, "recon": 0.0, "ice_phys": 0.0, "n": 0}
+
+            for batch in train_loader:
+                hazy, clear = batch[0].to(self.device), batch[1].to(self.device)
+                warm_optimizer.zero_grad(set_to_none=True)
+
+                use_prompt = _random.random() >= prompt_drop
+                with torch.autocast(
+                        "cuda", dtype=amp_dtype, enabled=amp_dtype is not None):
+                    fog_prompt = None
+                    if use_prompt:
+                        fog_prompt = prompt_extractor(hazy)
+                    pred = model(hazy, fog_prompt=fog_prompt) if hasattr(
+                        model, "hawfe") else model(hazy)
+
+                    pred_f, clear_f = pred.float(), clear.float()
+                    l1 = F.l1_loss(pred_f, clear_f)
+                    ssim_val = 1.0 - _ssim(pred_f, clear_f)
+                    loss_recon = lambda_l1 * l1 + lambda_ssim * ssim_val
+                    loss_ice = pred_f.sum() * 0.0  # 无合成器元数据时跳过
+                    loss = loss_recon + lambda_ice_phys * loss_ice
+
+                scaler.scale(loss).backward()
+                if grad_clip > 0:
+                    scaler.unscale_(warm_optimizer)
+                    torch.nn.utils.clip_grad_norm_(warm_params, grad_clip)
+                scaler.step(warm_optimizer)
+                scaler.update()
+
+                ep["loss"] += loss.item()
+                ep["recon"] += loss_recon.item()
+                ep["n"] += 1
+
+            warm_scheduler.step()
+            val_psnr, val_ssim = self.validate(model, val_loader,
+                                               prompt_extractor)
+            line = (f"[A] Epoch {epoch+1}/{warm_cfg['epochs']} "
+                    f"loss={ep['loss']/max(ep['n'],1):.4f} "
+                    f"psnr={val_psnr:.2f} [{time.time()-t0:.1f}s]")
+            print(line)
+            log_file.write(line + "\n")
+            log_file.flush()
+            if val_psnr > best_psnr:
+                best_psnr = val_psnr
+                torch.save({"model": model.state_dict(), "epoch": epoch+1,
+                            "best_psnr": best_psnr, "version": "joint_v2"},
+                           self.ckpt_dir / "joint_v2_best.pth")
+
+        # ==================== Stage-B: joint ====================
+        print(f"  [Stage-B] joint {joint_cfg['epochs']} epochs, "
+              f"backbone 冻结, neck+head 微调")
+        joint_lr = joint_cfg.get("lr", 5e-5)
+        joint_params = list(model.parameters())
+        if prompt_extractor is not None:
+            joint_params += list(prompt_extractor.proj.parameters())
+        joint_params += list(detector.trainable_parameters)
+        joint_params += list(uw.parameters())
+        joint_optimizer = AdamW(joint_params, lr=joint_lr, weight_decay=1e-4)
+        joint_scheduler = CosineAnnealingLR(
+            joint_optimizer, T_max=joint_cfg["epochs"], eta_min=1e-7)
+
+        for epoch in range(joint_cfg["epochs"]):
+            model.train()
+            detector.eval()  # backbone 冻结, neck BN 不更新
+            t0 = time.time()
+            ep = {"loss": 0.0, "recon": 0.0, "box_feat": 0.0,
+                  "detect": 0.0, "box_align": 0.0, "ice_phys": 0.0,
+                  "n": 0, "n_prompt": 0}
+
+            for batch in train_loader:
+                hazy, clear = batch[0].to(self.device), batch[1].to(self.device)
+                bboxes = batch[-2].to(self.device) if len(batch) >= 4 else None
+                classes = batch[-1].to(self.device) if len(batch) >= 5 else None
+
+                joint_optimizer.zero_grad(set_to_none=True)
+                use_prompt = _random.random() >= prompt_drop
+
+                with torch.autocast(
+                        "cuda", dtype=amp_dtype, enabled=amp_dtype is not None):
+                    fog_prompt = None
+                    if use_prompt:
+                        fog_prompt = prompt_extractor(hazy)
+                        ep["n_prompt"] += 1
+                    pred = model(hazy, fog_prompt=fog_prompt) if hasattr(
+                        model, "hawfe") else model(hazy)
+
+                    pred_f, clear_f = pred.float(), clear.float()
+
+                    # L1: 重建 (L1 + SSIM)
+                    l1 = F.l1_loss(pred_f, clear_f)
+                    ssim_val = 1.0 - _ssim(pred_f, clear_f)
+                    L1 = lambda_l1 * l1 + lambda_ssim * ssim_val
+
+                    # L2: 框内特征保持
+                    L2 = pred_f.sum() * 0.0
+                    if bboxes is not None and bboxes.numel() > 0:
+                        if isinstance(bboxes, (list, tuple)):
+                            bboxes_t = bboxes[0] if len(bboxes) > 0 else None
+                        else:
+                            bboxes_t = bboxes
+                        if bboxes_t is not None and bboxes_t.numel() > 0:
+                            L2 = lambda_box_feat * box_feat_loss(
+                                pred_f, clear_f, bboxes_t, detector=detector)
+
+                    # L3: 可检测性
+                    det_out = detector(pred_f)
+                    L3 = lambda_detect * detect_loss(det_out, classes)
+
+                    # L4: 框对齐
+                    L4 = pred_f.sum() * 0.0
+                    if bboxes is not None and classes is not None:
+                        L4 = lambda_box_align * box_align_loss(
+                            det_out, bboxes_t if bboxes is not None else None,
+                            classes)
+
+                    # L5: 冰面物理一致性 (无合成器元数据时跳过)
+                    L5 = pred_f.sum() * 0.0
+
+                    # 不确定性加权
+                    loss = uw([L1, L2, L3, L4, L5])
+
+                scaler.scale(loss).backward()
+                if grad_clip > 0:
+                    scaler.unscale_(joint_optimizer)
+                    torch.nn.utils.clip_grad_norm_(joint_params, grad_clip)
+                scaler.step(joint_optimizer)
+                scaler.update()
+
+                ep["loss"] += loss.item()
+                ep["recon"] += float(L1)
+                ep["box_feat"] += float(L2)
+                ep["detect"] += float(L3)
+                ep["box_align"] += float(L4)
+                ep["ice_phys"] += float(L5)
+                ep["n"] += 1
+
+            joint_scheduler.step()
+            val_psnr, val_ssim = self.validate(model, val_loader,
+                                               prompt_extractor)
+            uw_state = [f"{float(s):.3f}" for s in uw.log_vars]
+            row = {
+                "epoch": epoch + 1, "stage": "B",
+                "loss": ep["loss"] / max(ep["n"], 1),
+                "recon": ep["recon"] / max(ep["n"], 1),
+                "box_feat": ep["box_feat"] / max(ep["n"], 1),
+                "detect": ep["detect"] / max(ep["n"], 1),
+                "box_align": ep["box_align"] / max(ep["n"], 1),
+                "ice_phys": ep["ice_phys"] / max(ep["n"], 1),
+                "psnr": val_psnr, "ssim": val_ssim,
+                "uw_s": uw_state,
+                "n_prompt": ep["n_prompt"],
+                "sec": round(time.time() - t0, 1),
+            }
+            metrics_history.append(row)
+            line = (f"[B] Epoch {epoch+1}/{joint_cfg['epochs']} "
+                    f"loss={row['loss']:.4f} psnr={val_psnr:.2f} "
+                    f"uw=[{','.join(uw_state)}] [{row['sec']}s]")
+            print(line)
+            log_file.write(line + "\n")
+            log_file.flush()
+
+            if val_psnr > best_psnr:
+                best_psnr = val_psnr
+                state = {"model": model.state_dict(), "epoch": epoch+1,
+                         "best_psnr": best_psnr, "version": "joint_v2"}
+                state["uncertainty"] = uw.state_dict()
+                state["detector"] = detector.state_dict()
+                torch.save(state, self.ckpt_dir / "joint_v2_best.pth")
+
+            with open(self.out_dir / "metrics.json", "w", encoding="utf-8") as f:
+                json.dump({"best_psnr": best_psnr,
+                           "history": metrics_history}, f, indent=2)
+
+        log_file.close()
+        print(f"=== 完成: best PSNR={best_psnr:.2f}, 输出 {self.out_dir} ===")
+        return best_psnr
 
 
 def _ssim(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
