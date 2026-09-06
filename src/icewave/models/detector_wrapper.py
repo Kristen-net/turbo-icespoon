@@ -68,6 +68,134 @@ class _StubNeck(nn.Module):
         return outs
 
 
+# ---------------------------------------------------------------------------
+# YOLOv8 真实模型封装 (基于 hook, 不拆 Sequential)
+# ---------------------------------------------------------------------------
+class _YOLOv8BackboneAdapter(nn.Module):
+    """包装 YOLOv8 层 0-9 (backbone), 输出 [P3, P4, P5].
+
+    YOLOv8 backbone 结构 (yolov8.yaml):
+        0: Conv P1/2    1: C2f P2/4    2: Conv P3/8    3: C2f
+        4: Conv P4/16  5: C2f         6: Conv P5/32  7: C2f
+        8: SPPF
+    保存的索引 (供 neck concat): 4 (P3), 6 (P4), 8/9 (P5)
+    """
+
+    # backbone 终止层 (0-indexed), backbone = layers[:9+1]
+    BACKBONE_END = 9  # SPPF 在 index 9 (如有 SPPF) 或 8
+
+    def __init__(self, yolo_layers):
+        super().__init__()
+        self.layers = nn.ModuleList(yolo_layers[:self.BACKBONE_END + 1])
+        # 保存需要输出的层索引 (P3=4, P4=6, P5=8/9)
+        self._p3_idx = 4
+        self._p4_idx = 6
+        self._p5_idx = min(self.BACKBONE_END, len(self.layers) - 1)
+
+    def forward(self, x):
+        saved = {}
+        for i, layer in enumerate(self.layers):
+            f = layer.f if hasattr(layer, 'f') else -1
+            if f != -1:
+                if isinstance(f, int):
+                    x = saved[f]
+                else:
+                    x = [saved[j] if j != -1 else x for j in f]
+            x = layer(x)
+            # 只保存需要的中间结果
+            if i in (self._p3_idx, self._p4_idx, self._p5_idx,
+                     self._p4_idx - 1, self._p3_idx - 1):
+                saved[i] = x
+            # 也保存后面可能需要的
+            if i >= self._p3_idx - 1:
+                saved[i] = x
+        return [saved[self._p3_idx], saved[self._p4_idx], saved[self._p5_idx]]
+
+
+class _YOLOv8NeckAdapter(nn.Module):
+    """包装 YOLOv8 层 10-22 (neck+head), 接收 [P3, P4, P5].
+
+    使用 YOLOv8 的路由逻辑 (m.f 字段) 处理 FPN+PAN skip connections。
+    最终 Detect 层输出 [cls, box, obj] per scale。
+    """
+
+    def __init__(self, yolo_layers, backbone_end: int = 9,
+                 num_classes: int = 4):
+        super().__init__()
+        self.num_classes = num_classes
+        self.layers = nn.ModuleList(yolo_layers[backbone_end + 1:])
+        self._backbone_end = backbone_end
+        self._p3_idx = 4
+        self._p4_idx = 6
+        self._p5_idx = min(backbone_end, len(yolo_layers) - 1)
+        # lateral (供 extract_neck_features 使用)
+        self._lateral_channels = [256, 512, 1024]  # YOLOv8 P3/P4/P5 通道
+
+    def forward(self, feats):
+        """feats: [P3, P4, P5] from backbone, 返回检测输出 list[dict]."""
+        saved = {
+            self._p3_idx: feats[0],
+            self._p4_idx: feats[1],
+            self._p5_idx: feats[2],
+        }
+        x = feats[2]  # 从 P5 开始 (upsample)
+        for i, layer in enumerate(self.layers):
+            real_idx = self._backbone_end + 1 + i
+            f = layer.f if hasattr(layer, 'f') else -1
+            if f != -1:
+                if isinstance(f, int):
+                    x = saved.get(f, x)
+                else:
+                    x = [saved.get(j, x) if j != -1 else x for j in f]
+            x = layer(x)
+            saved[real_idx] = x
+
+        # 解析 Detect 输出
+        return self._parse_detect_output(x)
+
+    def _parse_detect_output(self, det_out):
+        """将 YOLOv8 Detect 层输出转为统一格式 list[dict]."""
+        outs = []
+        if isinstance(det_out, (list, tuple)):
+            for i, scale_out in enumerate(det_out):
+                if isinstance(scale_out, torch.Tensor):
+                    B = scale_out.shape[0]
+                    if scale_out.dim() == 4:
+                        B, C, H, W = scale_out.shape
+                        scale_out = scale_out.permute(0, 2, 3, 1).reshape(
+                            B, H * W, C)
+                    n_anchors = scale_out.shape[1]
+                    box_dim = 4 + 4 * 4  # 4 + reg_max * 4 (YOLOv8 DFL)
+                    if scale_out.shape[-1] >= box_dim + self.num_classes:
+                        box_raw = scale_out[..., :4]
+                        obj = torch.sigmoid(scale_out[..., box_dim:box_dim + 1].squeeze(-1))
+                        cls = torch.sigmoid(scale_out[..., box_dim + 1:])
+                    else:
+                        box_raw = scale_out[..., :4]
+                        obj = torch.sigmoid(scale_out[..., 4])
+                        cls = torch.sigmoid(scale_out[..., 5:])
+                    outs.append({
+                        "cls": cls, "box": box_raw, "obj": obj,
+                        "grid_h": int(n_anchors ** 0.5),
+                        "grid_w": int(n_anchors ** 0.5),
+                        "scale": i,
+                    })
+        return outs
+
+    @property
+    def lateral(self):
+        """返回 lateral conv 列表 (供 extract_neck_features 兼容).
+
+        用 1x1 conv 近似: YOLOv8 neck 的第一个 C2f 有降维效果。
+        此属性仅为 API 兼容; 真实特征提取用 extract_neck_features。
+        """
+        if not hasattr(self, '_lateral_mods'):
+            self._lateral_mods = nn.ModuleList([
+                nn.Conv2d(c, c, 1) for c in self._lateral_channels
+            ])
+        return self._lateral_mods
+
+
 class DetectorWrapper(nn.Module):
     """冻结 backbone 的检测器封装.
 
@@ -91,7 +219,13 @@ class DetectorWrapper(nn.Module):
             try:
                 from ultralytics import YOLO
                 model = YOLO(weights)
-                self.backbone, self.neck = self._split_yolo(model.model.model)
+                yolo_layers = model.model.model
+                self.backbone = _YOLOv8BackboneAdapter(yolo_layers)
+                self.neck = _YOLOv8NeckAdapter(
+                    yolo_layers,
+                    backbone_end=self.backbone.BACKBONE_END,
+                    num_classes=num_classes,
+                )
             except ImportError:
                 raise ImportError(
                     "加载真实 YOLOv8 需要 ultralytics: "
@@ -101,11 +235,6 @@ class DetectorWrapper(nn.Module):
         if freeze_backbone:
             for p in self.backbone.parameters():
                 p.requires_grad_(False)
-
-    @staticmethod
-    def _split_yolo(yolo_layers):
-        """将 YOLOv8 层列表拆分为 backbone + neck+head."""
-        raise NotImplementedError("真实 YOLOv8 拆分待 GPU 环境实现")
 
     def extract_neck_features(self, img: torch.Tensor) -> list[torch.Tensor]:
         """提取 P3/P4/P5 三尺度特征 (供 BoxFeaturePreservationLoss).
@@ -119,7 +248,10 @@ class DetectorWrapper(nn.Module):
         with torch.no_grad():
             feats = self.backbone(img)
         # neck 的 lateral 输出 (有梯度)
-        return [lat(f) for lat, f in zip(self.neck.lateral, feats)]
+        if self._is_stub:
+            return [lat(f) for lat, f in zip(self.neck.lateral, feats)]
+        # YOLOv8: 直接返回 backbone 特征 (已 detach)
+        return feats
 
     def forward(self, img: torch.Tensor) -> list[dict]:
         """前向传播, 返回多尺度检测输出.
