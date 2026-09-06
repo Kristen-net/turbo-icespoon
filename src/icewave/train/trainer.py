@@ -44,6 +44,50 @@ from icewave.utils.paths import OUTPUT_DIR
 from icewave.utils.seed import seed_everything, worker_init_fn
 
 
+def _joint_v2_collate(batch):
+    """自定义 collate: 处理变长 bbox 和 cls 列表.
+
+    将 bbox 从 (N_i, 4) padding 到 (max_N, 4), cls 同理,
+    返回 padding mask 供损失函数使用。
+    """
+    # batch: list of tuples, 每个元素可能是:
+    #   (hazy, clear, ice, bbox, cls) 或 (hazy, clear, ice, corridor, bbox, cls)
+    has_corridor = len(batch[0]) == 6
+    if has_corridor:
+        hazy = torch.stack([b[0] for b in batch])
+        clear = torch.stack([b[1] for b in batch])
+        ice = torch.stack([b[2] for b in batch])
+        corridor = torch.stack([b[3] for b in batch])
+        bboxes_list = [b[4] for b in batch]
+        cls_list = [b[5] for b in batch]
+    else:
+        hazy = torch.stack([b[0] for b in batch])
+        clear = torch.stack([b[1] for b in batch])
+        ice = torch.stack([b[2] for b in batch])
+        bboxes_list = [b[3] for b in batch]
+        cls_list = [b[4] for b in batch]
+
+    # Padding bbox 和 cls
+    max_n = max(b.shape[0] for b in bboxes_list) if bboxes_list else 0
+    max_n = max(max_n, 1)  # 至少 1 个 slot
+
+    B = len(batch)
+    padded_bbox = torch.zeros(B, max_n, 4)
+    padded_cls = torch.full((B, max_n), -1, dtype=torch.long)
+    bbox_mask = torch.zeros(B, max_n, dtype=torch.bool)
+
+    for i, (bb, cc) in enumerate(zip(bboxes_list, cls_list)):
+        n = bb.shape[0]
+        if n > 0:
+            padded_bbox[i, :n] = bb
+            padded_cls[i, :n] = cc
+            bbox_mask[i, :n] = True
+
+    if has_corridor:
+        return hazy, clear, ice, corridor, padded_bbox, padded_cls
+    return hazy, clear, ice, padded_bbox, padded_cls
+
+
 class Trainer:
     def __init__(self, cfg: Dict[str, Any]):
         self.cfg = cfg
@@ -315,6 +359,7 @@ class Trainer:
         cfg = self.cfg
         tcfg = cfg.get("train", {})
         lcfg = cfg.get("losses", {})
+        is_joint_v2 = True
         stages = tcfg.get("stages", {})
         warm_cfg = stages.get("warm_up", {"epochs": 8, "lr": 1e-4})
         joint_cfg = stages.get("joint", {"epochs": 40, "lr": 5e-5})
@@ -334,12 +379,17 @@ class Trainer:
             model.load_state_dict(ckpt.get("model", ckpt), strict=False)
             print(f"  从检查点初始化: {init_from}")
 
-        # --- CLIP 提示 ---
-        prompt_extractor = CLIPFogPrompt(
-            prompt_channels=32, device=self.device).to(self.device)
-        prompt_extractor.clip.eval()
-        prompt_drop = tcfg.get("prompt_drop_prob", 0.5)
-        teacher = HazeCLIPTeacher(device=self.device)
+        # --- CLIP 提示 (可选) ---
+        prompt_drop = tcfg.get("prompt_drop_prob", 1.0)
+        prompt_extractor = None
+        try:
+            prompt_extractor = CLIPFogPrompt(
+                prompt_channels=32, device=self.device).to(self.device)
+            prompt_extractor.clip.eval()
+            print("  CLIP 提示提取器已加载")
+        except Exception as e:
+            print(f"  [警告] CLIP 不可用 ({e}), 跳过提示注入")
+            prompt_drop = 1.0
 
         # --- 检测器 (Stub 模式, GPU 环境加载真实 YOLOv8) ---
         det_weights = cfg["model"].get("detector_weights")
@@ -374,13 +424,15 @@ class Trainer:
 
         # --- 数据 ---
         train_ds, val_ds = self._build_datasets()
+        collate_fn = _joint_v2_collate if is_joint_v2 else None
         train_loader = DataLoader(
             train_ds, batch_size=batch_size, shuffle=True,
             num_workers=num_workers, pin_memory=True, drop_last=True,
-            worker_init_fn=worker_init_fn)
+            worker_init_fn=worker_init_fn, collate_fn=collate_fn)
         val_loader = DataLoader(
             val_ds, batch_size=1, shuffle=False,
-            num_workers=num_workers, pin_memory=True)
+            num_workers=num_workers, pin_memory=True,
+            collate_fn=collate_fn)
         print(f"  训练集: {train_ds!r}\n  验证集: {val_ds!r}")
 
         lambda_l1 = lcfg.get("lambda_recon_l1", 1.0)
@@ -420,7 +472,8 @@ class Trainer:
                 hazy, clear = batch[0].to(self.device), batch[1].to(self.device)
                 warm_optimizer.zero_grad(set_to_none=True)
 
-                use_prompt = _random.random() >= prompt_drop
+                use_prompt = (prompt_extractor is not None
+                               and _random.random() >= prompt_drop)
                 with torch.autocast(
                         "cuda", dtype=amp_dtype, enabled=amp_dtype is not None):
                     fog_prompt = None
@@ -489,7 +542,8 @@ class Trainer:
                 classes = batch[-1].to(self.device) if len(batch) >= 5 else None
 
                 joint_optimizer.zero_grad(set_to_none=True)
-                use_prompt = _random.random() >= prompt_drop
+                use_prompt = (prompt_extractor is not None
+                               and _random.random() >= prompt_drop)
 
                 with torch.autocast(
                         "cuda", dtype=amp_dtype, enabled=amp_dtype is not None):
@@ -507,27 +561,27 @@ class Trainer:
                     ssim_val = 1.0 - _ssim(pred_f, clear_f)
                     L1 = lambda_l1 * l1 + lambda_ssim * ssim_val
 
-                    # L2: 框内特征保持
+                    # L2: 框内特征保持 (flatten padded bbox)
                     L2 = pred_f.sum() * 0.0
                     if bboxes is not None and bboxes.numel() > 0:
-                        if isinstance(bboxes, (list, tuple)):
-                            bboxes_t = bboxes[0] if len(bboxes) > 0 else None
-                        else:
-                            bboxes_t = bboxes
-                        if bboxes_t is not None and bboxes_t.numel() > 0:
+                        # bboxes: (B, max_N, 4), classes: (B, max_N)
+                        # 过滤 padding (cls == -1)
+                        valid_mask = (classes >= 0)  # (B, max_N)
+                        if valid_mask.any():
+                            # Flatten valid boxes across batch
+                            flat_bboxes = bboxes[valid_mask]  # (N_valid, 4)
                             L2 = lambda_box_feat * box_feat_loss(
-                                pred_f, clear_f, bboxes_t, detector=detector)
+                                pred_f, clear_f, flat_bboxes, detector=detector)
 
                     # L3: 可检测性
                     det_out = detector(pred_f)
                     L3 = lambda_detect * detect_loss(det_out, classes)
 
-                    # L4: 框对齐
+                    # L4: 框对齐 (padded format: B, max_N, 4)
                     L4 = pred_f.sum() * 0.0
                     if bboxes is not None and classes is not None:
                         L4 = lambda_box_align * box_align_loss(
-                            det_out, bboxes_t if bboxes is not None else None,
-                            classes)
+                            det_out, bboxes, classes)
 
                     # L5: 冰面物理一致性 (无合成器元数据时跳过)
                     L5 = pred_f.sum() * 0.0

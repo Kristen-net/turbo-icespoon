@@ -1,0 +1,38 @@
+# Smoke test 配置: 验证 joint_v2 训练流程不报错
+# 用途: 1 epoch + 小 batch + 合成数据 + 无 CLIP + Stub 检测器
+model:
+  version: joint_v2
+  backbone: s
+  init_checkpoint: null  # 无预训练权重, 从头开始
+  detector_weights: null  # Stub 模式
+
+data:
+  root: data/synthetic
+  patch_size: 128
+  with_bboxes: true
+
+train:
+  batch_size: 2
+  num_workers: 0
+  prompt_drop_prob: 1.0  # CLIP 不可用, 全程不使用
+  stages:
+    warm_up:
+      epochs: 1
+      lr: 1.0e-4
+    joint:
+      epochs: 1
+      lr: 5.0e-5
+      grad_clip: 10.0
+
+losses:
+  K: 5
+  lambda_recon_l1: 1.0
+  lambda_recon_ssim: 0.1
+  lambda_box_feat: 0.5
+  lambda_detect: 0.2
+  lambda_box_align: 0.5
+  lambda_ice_phys: 0.3
+  box_feat_type: detector
+  detect_tau_cls: 0.01  # 降低阈值确保有匹配
+  s_init: 0.0
+  s_clamp: [-6.0, 6.0]
